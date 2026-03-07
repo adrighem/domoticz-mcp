@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "domoticz-mcp"
+version = "0.1.0"
+description = "A Model Context Protocol (MCP) server for Domoticz home automation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-only"}
+authors = [
+    {name = "Vincent"}
+]
+dependencies = [
+    "mcp",
+    "httpx",
+]
+
+[project.scripts]
+domoticz-mcp = "domoticz_mcp.server:main"

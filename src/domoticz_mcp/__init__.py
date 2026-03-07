@@ -1,0 +1,1 @@
+"""Domoticz MCP server package."""
