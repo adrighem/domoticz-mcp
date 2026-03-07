@@ -49,6 +49,33 @@ The server requires configuration to connect to your Domoticz instance. These ar
 
 ## MCP Client Configuration
 
+### Gemini CLI
+
+Add the following to your `~/.gemini/settings.json` under the `mcp.servers` object:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "domoticz": {
+        "command": "uv",
+        "args": [
+          "--directory",
+          "/path/to/domoticz-mcp",
+          "run",
+          "domoticz-mcp"
+        ],
+        "env": {
+          "DOMOTICZ_URL": "http://192.168.1.x:8080",
+          "DOMOTICZ_USERNAME": "your_username",
+          "DOMOTICZ_PASSWORD": "your_password"
+        }
+      }
+    }
+  }
+}
+```
+
 ### Claude Desktop
 
 Add the following to your `claude_desktop_config.json`:

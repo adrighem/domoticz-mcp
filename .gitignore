@@ -16,6 +16,7 @@ lib/
 lib64/
 parts/
 sdist/
+uv.lock
 var/
 wheels/
 *.egg-info/
