@@ -195,7 +195,7 @@ async def get_events() -> str:
 async def get_hardware() -> str:
     """Get all hardware/gateways configured in Domoticz."""
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=hardware")
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
         response.raise_for_status()
         return response.text
 
@@ -203,7 +203,7 @@ async def get_hardware() -> str:
 async def get_settings() -> str:
     """Get global Domoticz settings and configuration."""
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=settings")
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getsettings")
         response.raise_for_status()
         return response.text
 
@@ -219,7 +219,7 @@ async def get_sun_times() -> str:
 async def get_cameras() -> str:
     """Get all configured cameras in Domoticz."""
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=cameras")
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getcameras")
         response.raise_for_status()
         return response.text
 
