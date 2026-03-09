@@ -192,6 +192,62 @@ async def get_events() -> str:
         return response.text
 
 @mcp.tool()
+async def get_event(event_id: int) -> str:
+    """Get the source code and details of a specific event script by ID."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event={event_id}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def create_event(name: str, interpreter: str, event_type: str, xmlstatement: str, eventstatus: str = "1") -> str:
+    """Create a new event script in Domoticz.
+    
+    Args:
+        name: Name of the event script.
+        interpreter: The language (e.g., 'Lua', 'Blockly', 'dzVents', 'Python').
+        event_type: Trigger type (e.g., 'All', 'Device', 'Security', 'Time', 'UserVariable').
+        xmlstatement: The source code (or XML for Blockly) of the script.
+        eventstatus: '1' for enabled, '0' for disabled.
+    """
+    async with create_client() as client:
+        data = {
+            "eventname": name,
+            "eventstatus": eventstatus,
+            "interpreter": interpreter,
+            "xmlstatement": xmlstatement,
+            "type": event_type
+        }
+        response = await client.post(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=save", data=data)
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def update_event(event_id: int, name: str, interpreter: str, event_type: str, xmlstatement: str, eventstatus: str = "1") -> str:
+    """Update an existing event script in Domoticz.
+    
+    Args:
+        event_id: The ID of the event to update.
+        name: Name of the event script.
+        interpreter: The language (e.g., 'Lua', 'Blockly', 'dzVents', 'Python').
+        event_type: Trigger type (e.g., 'All', 'Device', 'Security', 'Time', 'UserVariable').
+        xmlstatement: The source code (or XML for Blockly) of the script.
+        eventstatus: '1' for enabled, '0' for disabled.
+    """
+    async with create_client() as client:
+        data = {
+            "eventid": str(event_id),
+            "eventname": name,
+            "eventstatus": eventstatus,
+            "interpreter": interpreter,
+            "xmlstatement": xmlstatement,
+            "type": event_type
+        }
+        response = await client.post(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=save", data=data)
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
 async def get_hardware() -> str:
     """Get all hardware/gateways configured in Domoticz."""
     async with create_client() as client:

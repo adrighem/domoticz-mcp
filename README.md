@@ -10,6 +10,7 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 - **User Variables:** Read, add, update, and delete Domoticz user variables.
 - **History and Logs:** Access device history graphs and text/light logs.
 - **System Information:** Get Domoticz instance version, global settings, hardware, sun times, users, and internal event scripts/rules.
+- **Event Management:** Get, create, and update internal event scripts (Blockly, Lua, dzVents, Python).
 - **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans.
 
 ## Prerequisites
