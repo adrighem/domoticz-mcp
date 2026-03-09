@@ -191,6 +191,54 @@ async def get_events() -> str:
         response.raise_for_status()
         return response.text
 
+@mcp.tool()
+async def get_hardware() -> str:
+    """Get all hardware/gateways configured in Domoticz."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=hardware")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_settings() -> str:
+    """Get global Domoticz settings and configuration."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=settings")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_sun_times() -> str:
+    """Get sun times (sunrise, sunset, twilight) based on home coordinates."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getsunrisenset")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_cameras() -> str:
+    """Get all configured cameras in Domoticz."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=cameras")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_floorplans() -> str:
+    """Get all configured floorplans in Domoticz."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=plans")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_users() -> str:
+    """Get all Domoticz user accounts."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=users")
+        response.raise_for_status()
+        return response.text
+
 def main():
     mcp.run()
 
