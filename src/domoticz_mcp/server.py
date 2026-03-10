@@ -212,13 +212,15 @@ async def create_event(name: str, interpreter: str, event_type: str, xmlstatemen
     """
     async with create_client() as client:
         data = {
-            "eventname": name,
+            "evparam": "create",
+            "name": name,
             "eventstatus": eventstatus,
             "interpreter": interpreter,
-            "xmlstatement": xmlstatement,
-            "type": event_type
+            "xml": xmlstatement,
+            "eventtype": event_type,
+            "logicarray": ""
         }
-        response = await client.post(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=save", data=data)
+        response = await client.post(f"{DOMOTICZ_API_URL}?type=command&param=events", data=data)
         response.raise_for_status()
         return response.text
 
@@ -236,14 +238,16 @@ async def update_event(event_id: int, name: str, interpreter: str, event_type: s
     """
     async with create_client() as client:
         data = {
+            "evparam": "create",
             "eventid": str(event_id),
-            "eventname": name,
+            "name": name,
             "eventstatus": eventstatus,
             "interpreter": interpreter,
-            "xmlstatement": xmlstatement,
-            "type": event_type
+            "xml": xmlstatement,
+            "eventtype": event_type,
+            "logicarray": ""
         }
-        response = await client.post(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=save", data=data)
+        response = await client.post(f"{DOMOTICZ_API_URL}?type=command&param=events", data=data)
         response.raise_for_status()
         return response.text
 
