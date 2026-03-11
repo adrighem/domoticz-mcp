@@ -26,3 +26,5 @@ wheels/
 .env.local
 .DS_Store
 test_oauth.py
+test_auth.py
+test_server.py

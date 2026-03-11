@@ -365,7 +365,11 @@ async def get_users() -> str:
         response.raise_for_status()
         return response.text
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser(description="Domoticz MCP Server")
+    parser.parse_args()
     mcp.run()
 
 if __name__ == "__main__":

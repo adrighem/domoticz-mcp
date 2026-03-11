@@ -83,27 +83,25 @@ If you prefer traditional username and password authentication:
 
 ### Gemini CLI
 
-Add the following to your `~/.gemini/settings.json` under the `mcp.servers` object:
+Add the following to your `~/.gemini/settings.json` under the `mcpServers` object:
 
 ```json
 {
-  "mcp": {
-    "servers": {
-      "domoticz": {
-        "command": "uv",
-        "args": [
-          "--directory",
-          "/path/to/domoticz-mcp",
-          "run",
-          "domoticz-mcp"
-        ],
-        "env": {
-          "DOMOTICZ_URL": "http://192.168.1.x:8080",
-          "DOMOTICZ_USERNAME": "your_username",
-          "DOMOTICZ_PASSWORD": "your_password",
-          "DOMOTICZ_CLIENT_ID": "your_client_id_here",
-          "DOMOTICZ_CLIENT_SECRET": "your_client_secret_here"
-        }
+  "mcpServers": {
+    "domoticz": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/domoticz-mcp",
+        "run",
+        "domoticz-mcp"
+      ],
+      "env": {
+        "DOMOTICZ_URL": "http://192.168.1.x:8080",
+        "DOMOTICZ_USERNAME": "your_username",
+        "DOMOTICZ_PASSWORD": "your_password",
+        "DOMOTICZ_CLIENT_ID": "your_client_id_here",
+        "DOMOTICZ_CLIENT_SECRET": "your_client_secret_here"
       }
     }
   }
