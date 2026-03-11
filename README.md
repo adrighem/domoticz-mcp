@@ -52,12 +52,21 @@ The server requires configuration to connect to your Domoticz instance. These ar
 You can authenticate the MCP server with Domoticz using either **Basic Auth** or an **OAuth/API Token** (Recommended). 
 
 #### Option 1: OAuth / API Token (Recommended)
-This approach uses a Bearer token and is generally more secure, as you can revoke the token at any time without changing your password.
+This approach uses an OAuth2 token and is generally more secure, as you can revoke the token at any time without changing your password.
 
-1. In the Domoticz UI, go to **Setup** -> **Settings** -> **Security**.
-2. Look for the API Tokens or OAuth2 section and generate a new token for the MCP Server.
-3. Configure the following environment variable:
-   - `DOMOTICZ_OAUTH_TOKEN`: The token string you generated.
+1. In the Domoticz UI, go to **Setup** -> **More Options** -> **Applications**.
+2. Click **Add Application** and configure:
+   - **Name**: e.g., `MCP Server`
+   - **isPublic**: Check this if you want to use Key-Pair, or leave unchecked for a Shared Secret.
+3. Note the generated **Client ID** and **Client Secret**.
+4. Configure the following environment variables. The server will automatically perform the OAuth2 `password` grant exchange to get a token:
+   - `DOMOTICZ_CLIENT_ID`: Your Application's Client ID.
+   - `DOMOTICZ_CLIENT_SECRET`: Your Application's Client Secret.
+   - `DOMOTICZ_USERNAME`: Your Domoticz username.
+   - `DOMOTICZ_PASSWORD`: Your Domoticz password.
+   
+Alternatively, if you already have a valid Bearer token, you can directly provide it:
+   - `DOMOTICZ_OAUTH_TOKEN`: Your valid Bearer token.
 
 *Note: If you use a token, you can safely disable "Allow Basic-Auth authentication over plain HTTP" in the Domoticz security settings.*
 
@@ -90,9 +99,10 @@ Add the following to your `~/.gemini/settings.json` under the `mcp.servers` obje
         ],
         "env": {
           "DOMOTICZ_URL": "http://192.168.1.x:8080",
-          "DOMOTICZ_OAUTH_TOKEN": "your_token_here",
-          "DOMOTICZ_USERNAME": "your_username_if_using_basic_auth",
-          "DOMOTICZ_PASSWORD": "your_password_if_using_basic_auth"
+          "DOMOTICZ_USERNAME": "your_username",
+          "DOMOTICZ_PASSWORD": "your_password",
+          "DOMOTICZ_CLIENT_ID": "your_client_id_here",
+          "DOMOTICZ_CLIENT_SECRET": "your_client_secret_here"
         }
       }
     }
@@ -117,9 +127,10 @@ Add the following to your `claude_desktop_config.json`:
       ],
       "env": {
         "DOMOTICZ_URL": "http://192.168.1.x:8080",
-        "DOMOTICZ_OAUTH_TOKEN": "your_token_here",
-        "DOMOTICZ_USERNAME": "your_username_if_using_basic_auth",
-        "DOMOTICZ_PASSWORD": "your_password_if_using_basic_auth"
+        "DOMOTICZ_USERNAME": "your_username",
+        "DOMOTICZ_PASSWORD": "your_password",
+        "DOMOTICZ_CLIENT_ID": "your_client_id_here",
+        "DOMOTICZ_CLIENT_SECRET": "your_client_secret_here"
       }
     }
   }
@@ -136,9 +147,10 @@ If you installed it globally via pip, you can use the command directly:
       "args": [],
       "env": {
         "DOMOTICZ_URL": "http://192.168.1.x:8080",
-        "DOMOTICZ_OAUTH_TOKEN": "your_token_here",
-        "DOMOTICZ_USERNAME": "your_username_if_using_basic_auth",
-        "DOMOTICZ_PASSWORD": "your_password_if_using_basic_auth"
+        "DOMOTICZ_USERNAME": "your_username",
+        "DOMOTICZ_PASSWORD": "your_password",
+        "DOMOTICZ_CLIENT_ID": "your_client_id_here",
+        "DOMOTICZ_CLIENT_SECRET": "your_client_secret_here"
       }
     }
   }
