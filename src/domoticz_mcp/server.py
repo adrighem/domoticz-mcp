@@ -20,8 +20,8 @@ if DOMOTICZ_BASE_URL.endswith('/json.htm'):
 DOMOTICZ_API_URL = f"{DOMOTICZ_BASE_URL}/json.htm"
 DOMOTICZ_USERNAME = os.environ.get("DOMOTICZ_USERNAME")
 DOMOTICZ_PASSWORD = os.environ.get("DOMOTICZ_PASSWORD")
-DOMOTICZ_CLIENT_ID = os.environ.get("DOMOTICZ_CLIENT_ID")
-DOMOTICZ_CLIENT_SECRET = os.environ.get("DOMOTICZ_CLIENT_SECRET")
+DOMOTICZ_CLIENT_ID = os.environ.get("DOMOTICZ_CLIENT_ID", os.environ.get("DOMOTICZ_CLIENTID"))
+DOMOTICZ_CLIENT_SECRET = os.environ.get("DOMOTICZ_CLIENT_SECRET", os.environ.get("DOMOTICZ_CLIENTSECRET"))
 
 _oauth_token_cache: Optional[str] = None
 
@@ -79,18 +79,17 @@ class DomoticzClient:
         
     async def __aenter__(self):
         # Determine authentication strategy
-        oauth_token = os.environ.get("DOMOTICZ_OAUTH_TOKEN")
-        
-        if not oauth_token and DOMOTICZ_CLIENT_ID:
+        oauth_token = None
+
+        if DOMOTICZ_CLIENT_ID:
             oauth_token = await _fetch_oauth_token()
-            
+
         if oauth_token:
             self.client.headers["Authorization"] = f"Bearer {oauth_token}"
         elif DOMOTICZ_USERNAME and DOMOTICZ_PASSWORD:
             self.client.auth = (DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD)
-            
-        return await self.client.__aenter__()
 
+        return await self.client.__aenter__()
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return await self.client.__aexit__(exc_type, exc_val, exc_tb)
 

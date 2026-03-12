@@ -64,12 +64,8 @@ This approach uses an OAuth2 token and is generally more secure, as you can revo
    - `DOMOTICZ_CLIENT_SECRET`: Your Application's Client Secret.
    - `DOMOTICZ_USERNAME`: Your Domoticz username.
    - `DOMOTICZ_PASSWORD`: Your Domoticz password.
-   
-Alternatively, if you already have a valid Bearer token, you can directly provide it:
-   - `DOMOTICZ_OAUTH_TOKEN`: Your valid Bearer token.
 
-*Note: If you use a token, you can safely disable "Allow Basic-Auth authentication over plain HTTP" in the Domoticz security settings.*
-
+   *Note: If you use a token, you can safely disable "Allow Basic-Auth authentication over plain HTTP" in the Domoticz security settings.*
 #### Option 2: Basic Auth
 If you prefer traditional username and password authentication:
 
