@@ -465,6 +465,70 @@ async def get_users() -> str:
         response.raise_for_status()
         return response.text
 
+@mcp.resource("domoticz://devices")
+async def get_all_devices_resource() -> str:
+    """Read the current state of all Domoticz devices."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true&order=Name")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://device/{idx}")
+async def get_device_resource(idx: int) -> str:
+    """Read the current state of a specific Domoticz device."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://rooms")
+async def get_rooms_resource() -> str:
+    """Read the list of all Domoticz rooms (Room Plans)."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://room/{idx}")
+async def get_room_resource(idx: int) -> str:
+    """Read the devices in a specific Domoticz room."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getplandevices&idx={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://user-variables")
+async def get_user_variables_resource() -> str:
+    """Read the list of all Domoticz user variables."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getuservariables")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://user-variable/{idx}")
+async def get_user_variable_resource(idx: int) -> str:
+    """Read a specific Domoticz user variable."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getuservariable&idx={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://events")
+async def get_events_resource() -> str:
+    """Read the overview of the internal event system scripts and rules."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://event/{event_id}")
+async def get_event_resource(event_id: int) -> str:
+    """Read the source code and details of a specific event script by ID."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event={event_id}")
+        response.raise_for_status()
+        return response.text
+
 import argparse
 
 def main():
