@@ -9,6 +9,16 @@
 from mcp.server.fastmcp import FastMCP
 import httpx
 import os
+import sys
+import json
+import base64
+import hashlib
+import urllib.parse
+import secrets
+import webbrowser
+import threading
+import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
 
 mcp = FastMCP("Domoticz")
@@ -23,19 +33,85 @@ DOMOTICZ_PASSWORD = os.environ.get("DOMOTICZ_PASSWORD")
 DOMOTICZ_CLIENT_ID = os.environ.get("DOMOTICZ_CLIENT_ID", os.environ.get("DOMOTICZ_CLIENTID"))
 DOMOTICZ_CLIENT_SECRET = os.environ.get("DOMOTICZ_CLIENT_SECRET", os.environ.get("DOMOTICZ_CLIENTSECRET"))
 
+TOKEN_FILE = os.path.expanduser("~/.config/domoticz-mcp/token.json")
 _oauth_token_cache: Optional[str] = None
+
+def _do_interactive_oauth_flow():
+    code = None
+    state_received = None
+    
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass # Suppress logging to stderr
+            
+        def do_GET(self):
+            nonlocal code, state_received
+            parsed_path = urllib.parse.urlparse(self.path)
+            if parsed_path.path == '/callback':
+                query = urllib.parse.parse_qs(parsed_path.query)
+                if 'code' in query:
+                    code = query['code'][0]
+                if 'state' in query:
+                    state_received = query['state'][0]
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>Authentication successful!</h1><p>You can close this window now and return to the application.</p></body></html>")
+                threading.Thread(target=self.server.shutdown).start()
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+    server = HTTPServer(('127.0.0.1', 0), CallbackHandler)
+    port = server.server_port
+    
+    state = secrets.token_urlsafe(16)
+    code_verifier = secrets.token_urlsafe(32)
+    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode('ascii')).digest()).decode('ascii').rstrip('=')
+    
+    redirect_uri = f"http://127.0.0.1:{port}/callback"
+    auth_url = f"{DOMOTICZ_BASE_URL}/oauth2/v1/authorize?response_type=code&client_id={DOMOTICZ_CLIENT_ID}&redirect_uri={urllib.parse.quote(redirect_uri)}&state={state}&code_challenge={code_challenge}&code_challenge_method=S256"
+    
+    sys.stderr.write(f"\n==========================================================\n")
+    sys.stderr.write(f"Authentication required for Domoticz MCP Server.\n")
+    sys.stderr.write(f"Please open this URL in your browser to authenticate:\n\n")
+    sys.stderr.write(f"{auth_url}\n\n")
+    sys.stderr.write(f"Waiting for authentication on {redirect_uri}...\n")
+    sys.stderr.write(f"==========================================================\n\n")
+    sys.stderr.flush()
+    
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+        
+    server.serve_forever()
+    
+    if code and state_received == state:
+        return code, code_verifier, redirect_uri
+    return None, None, None
 
 async def _fetch_oauth_token() -> Optional[str]:
     global _oauth_token_cache
     if _oauth_token_cache:
         return _oauth_token_cache
+        
+    # Try loading from file first
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, 'r') as f:
+                token_data = json.load(f)
+                if "access_token" in token_data:
+                    _oauth_token_cache = token_data["access_token"]
+                    return _oauth_token_cache
+        except Exception as e:
+            sys.stderr.write(f"Failed to load token file: {e}\n")
 
-    if not all([DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET, DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD]):
+    if not DOMOTICZ_CLIENT_ID:
         return None
 
     try:
         async with httpx.AsyncClient() as client:
-            # Discover endpoints
             discovery_url = f"{DOMOTICZ_BASE_URL}/.well-known/openid-configuration"
             resp = await client.get(discovery_url)
             resp.raise_for_status()
@@ -45,27 +121,52 @@ async def _fetch_oauth_token() -> Optional[str]:
             if not token_endpoint:
                 return None
                 
-            # Rewrite token_endpoint to base_url if needed (in case of proxying issues)
             if "127.0.0.1" in token_endpoint or "localhost" in token_endpoint:
-                import urllib.parse
                 parsed = urllib.parse.urlparse(token_endpoint)
                 token_endpoint = f"{DOMOTICZ_BASE_URL}{parsed.path}"
 
-            data = {
-                "grant_type": "password",
-                "client_id": DOMOTICZ_CLIENT_ID,
-                "client_secret": DOMOTICZ_CLIENT_SECRET
-            }
-            
-            # Post to token endpoint using Basic Auth for the user credentials
-            token_resp = await client.post(
-                token_endpoint, 
-                auth=(DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD),
-                data=data
-            )
+            if DOMOTICZ_USERNAME and DOMOTICZ_PASSWORD:
+                data = {
+                    "grant_type": "password",
+                    "client_id": DOMOTICZ_CLIENT_ID,
+                    "client_secret": DOMOTICZ_CLIENT_SECRET
+                }
+                token_resp = await client.post(
+                    token_endpoint, 
+                    auth=(DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD),
+                    data=data
+                )
+            else:
+                code, code_verifier, redirect_uri = await asyncio.to_thread(_do_interactive_oauth_flow)
+                if not code:
+                    return None
+                    
+                data = {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "client_id": DOMOTICZ_CLIENT_ID,
+                    "code_verifier": code_verifier
+                }
+                
+                auth = (DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET) if DOMOTICZ_CLIENT_SECRET else None
+                
+                token_resp = await client.post(
+                    token_endpoint,
+                    auth=auth,
+                    data=data
+                )
+
             token_resp.raise_for_status()
             token_data = token_resp.json()
+            
             _oauth_token_cache = token_data.get("access_token")
+            
+            # Save token to file
+            os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+            with open(TOKEN_FILE, 'w') as f:
+                json.dump(token_data, f)
+                
             return _oauth_token_cache
     except Exception as e:
         import logging
