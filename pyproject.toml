@@ -17,5 +17,12 @@ dependencies = [
     "httpx",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "respx"
+]
+
 [project.scripts]
 domoticz-mcp = "domoticz_mcp.server:main"

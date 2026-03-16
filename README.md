@@ -175,6 +175,21 @@ If you installed it globally via pip, you can use the command directly:
 
 For other clients that support the Model Context Protocol, simply configure them to run the `domoticz-mcp` binary or the `uv run` command with the appropriate environment variables.
 
+## Development and Testing
+
+To develop and run tests for this project:
+
+1. Clone the repository.
+2. Create a virtual environment and install development dependencies using `uv`:
+   ```bash
+   uv venv
+   uv pip install -e ".[dev]"
+   ```
+3. Run the test suite:
+   ```bash
+   uv run pytest
+   ```
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0 (GPLv3). See the [LICENSE](LICENSE) file for details.
