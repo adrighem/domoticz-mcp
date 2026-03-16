@@ -7,11 +7,11 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 The server exposes **Tools** (for active control and modifications), **Resources** (for read-only contextual awareness), and **Prompts** (for guided interaction templates).
 
 ### Tools (Actions)
-- **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, control blinds, and manage RGB/color lighting (brightness, hue, color temperature).
-- **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values.
-- **Rooms and Scenes:** Control scenes/groups.
-- **User Variables:** Read, add, update, and delete Domoticz user variables.
-- **History and Logs:** Access device history graphs and text/light logs. Retrieve system logs and add custom log messages.
+- **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, control blinds, and manage RGB/color lighting (brightness, hue, color temperature). Supports lookup by `idx` or `name`.
+- **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values. Supports lookup by `idx` or `name`.
+- **Rooms and Scenes:** Control scenes/groups. Get room devices by `idx` or `room_name`.
+- **User Variables:** Read, add, update, and delete Domoticz user variables. Supports lookup by `idx` or `name`.
+- **History and Logs:** Access device history graphs and text/light logs by `idx` or `name`. Retrieve system logs and add custom log messages.
 - **System Information:** Get Domoticz instance version, global settings, hardware, sun times, users, and internal event scripts/rules.
 - **Security:** Get and set the Domoticz security panel status.
 - **Notifications:** Send notifications through the Domoticz notification subsystem.
@@ -20,11 +20,13 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ### Resources (Context)
 - **`domoticz://devices`**: Read the current state of all Domoticz devices.
-- **`domoticz://device/{idx}`** or **`domoticz://device/{type}/{subtype}/{idx}`**: Read the current state of a specific device.
+- **`domoticz://device/{idx}`**, **`domoticz://device/{type}/{subtype}/{idx}`**, or **`domoticz://device/name/{name}`**: Read the current state of a specific device.
 - **`domoticz://rooms`**: Read configured rooms (Room Plans).
 - **`domoticz://room/{idx}`** or **`domoticz://room/{room_name}/{idx}`**: Read the full states of all devices within a specific room.
-- **`domoticz://scenes` & `domoticz://scene/{idx}`**: Read configured scenes and the list of devices belonging to a specific scene.
-- **`domoticz://user-variables` & `domoticz://user-variable/{idx}`**: Read the list of all or specific Domoticz user variables.
+- **`domoticz://scenes`**: Read configured scenes.
+- **`domoticz://scene/{idx}`** or **`domoticz://scene/name/{name}`**: Read the list of devices belonging to a specific scene.
+- **`domoticz://user-variables`**: Read the list of all Domoticz user variables.
+- **`domoticz://user-variable/{idx}`** or **`domoticz://user-variable/name/{name}`**: Read a specific Domoticz user variable.
 - **`domoticz://events` & `domoticz://event/{event_id}`**: Read the overview and specific source code of event scripts.
 - **`domoticz://log`**: Read the current Domoticz system log.
 - **`domoticz://security`**: Read the current status of the security panel.
@@ -32,7 +34,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ### Prompts (Templates)
 - **`summarize_home`**: A prompt that instructs the AI to read the home state (devices, temperature, open doors) and provide a human-readable summary.
-- **`troubleshoot_device`**: A template that asks for a device `idx` and instructs the AI to read the device state and system logs to diagnose issues.
+- **`troubleshoot_device`**: A template that asks for a device `idx` or `name` and instructs the AI to read the device state and system logs to diagnose issues.
 - **`analyze_automations`**: Instructs the AI to review your internal event scripts for logic flaws or optimizations.
 
 ## Prerequisites

@@ -197,6 +197,42 @@ class DomoticzClient:
 def create_client():
     return DomoticzClient()
 
+async def _resolve_device_idx(client, idx: int = None, name: str = None) -> int | None:
+    if idx is not None:
+        return idx
+    if not name:
+        return None
+    response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
+    response.raise_for_status()
+    for dev in response.json().get("result", []):
+        if dev.get("Name", "").lower() == name.lower():
+            return int(dev.get("idx"))
+    return None
+
+async def _resolve_scene_idx(client, idx: int = None, name: str = None) -> int | None:
+    if idx is not None:
+        return idx
+    if not name:
+        return None
+    response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenes")
+    response.raise_for_status()
+    for scene in response.json().get("result", []):
+        if scene.get("Name", "").lower() == name.lower():
+            return int(scene.get("idx"))
+    return None
+
+async def _resolve_user_variable_idx(client, idx: int = None, name: str = None) -> int | None:
+    if idx is not None:
+        return idx
+    if not name:
+        return None
+    response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getuservariables")
+    response.raise_for_status()
+    for var in response.json().get("result", []):
+        if var.get("Name", "").lower() == name.lower():
+            return int(var.get("idx"))
+    return None
+
 @mcp.tool()
 async def get_all_devices() -> str:
     """Get all devices and their current states from Domoticz."""
@@ -206,56 +242,86 @@ async def get_all_devices() -> str:
         return response.text
 
 @mcp.tool()
-async def get_device(idx: int) -> str:
-    """Get a specific device state by IDX from Domoticz."""
+async def get_device(idx: int = None, name: str = None) -> str:
+    """Get a specific device state by IDX or Name from Domoticz."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={idx}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={resolved_idx}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def toggle_switch(idx: int) -> str:
-    """Toggle a switch or light by IDX in Domoticz."""
+async def toggle_switch(idx: int = None, name: str = None) -> str:
+    """Toggle a switch or light by IDX or Name in Domoticz."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={idx}&switchcmd=Toggle")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd=Toggle")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def set_switch_state(idx: int, state: str) -> str:
-    """Set a switch or light to On or Off by IDX in Domoticz. state must be 'On' or 'Off'."""
+async def set_switch_state(state: str, idx: int = None, name: str = None) -> str:
+    """Set a switch or light to On or Off by IDX or Name in Domoticz. state must be 'On' or 'Off'."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     if state.lower() not in ['on', 'off']:
-        return "Error: state must be 'On' or 'Off'"
+        return '{"status": "error", "message": "state must be \'On\' or \'Off\'"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={idx}&switchcmd={state.capitalize()}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd={state.capitalize()}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def set_dimmer_level(idx: int, level: int) -> str:
-    """Set the brightness level of a dimmer switch (0-100) by IDX in Domoticz."""
+async def set_dimmer_level(level: int, idx: int = None, name: str = None) -> str:
+    """Set the brightness level of a dimmer switch (0-100) by IDX or Name in Domoticz."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     if not (0 <= level <= 100):
-        return "Error: level must be between 0 and 100"
+        return '{"status": "error", "message": "level must be between 0 and 100"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={idx}&switchcmd=Set%20Level&level={level}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd=Set%20Level&level={level}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def set_temperature_setpoint(idx: int, setpoint: float) -> str:
-    """Set the temperature setpoint for a thermostat by IDX in Domoticz."""
+async def set_temperature_setpoint(setpoint: float, idx: int = None, name: str = None) -> str:
+    """Set the temperature setpoint for a thermostat by IDX or Name in Domoticz."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setsetpoint&idx={idx}&setpoint={setpoint}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setsetpoint&idx={resolved_idx}&setpoint={setpoint}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def control_blinds(idx: int, command: str) -> str:
-    """Control blinds by IDX in Domoticz. command must be 'Open', 'Close', or 'Stop'."""
+async def control_blinds(command: str, idx: int = None, name: str = None) -> str:
+    """Control blinds by IDX or Name in Domoticz. command must be 'Open', 'Close', or 'Stop'."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     if command.capitalize() not in ['Open', 'Close', 'Stop']:
-        return "Error: command must be 'Open', 'Close', or 'Stop'"
+        return '{"status": "error", "message": "command must be \'Open\', \'Close\', or \'Stop\'"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={idx}&switchcmd={command.capitalize()}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd={command.capitalize()}")
         response.raise_for_status()
         return response.text
 
@@ -268,12 +334,17 @@ async def get_scenes() -> str:
         return response.text
 
 @mcp.tool()
-async def switch_scene(idx: int, command: str) -> str:
-    """Turn a scene or group On or Off by IDX in Domoticz. command must be 'On', 'Off', or 'Toggle'. Scenes can only be turned 'On'."""
+async def switch_scene(command: str, idx: int = None, name: str = None) -> str:
+    """Turn a scene or group On or Off by IDX or Name in Domoticz. command must be 'On', 'Off', or 'Toggle'. Scenes can only be turned 'On'."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     if command.capitalize() not in ['On', 'Off', 'Toggle']:
-        return "Error: command must be 'On', 'Off', or 'Toggle'"
+        return '{"status": "error", "message": "command must be \'On\', \'Off\', or \'Toggle\'"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchscene&idx={idx}&switchcmd={command.capitalize()}")
+        resolved_idx = await _resolve_scene_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Scene not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=switchscene&idx={resolved_idx}&switchcmd={command.capitalize()}")
         response.raise_for_status()
         return response.text
 
@@ -334,25 +405,36 @@ async def update_user_variable(name: str, vtype: int, value: str) -> str:
         return response.text
 
 @mcp.tool()
-async def delete_user_variable(idx: int) -> str:
-    """Delete a user variable by IDX."""
+async def delete_user_variable(idx: int = None, name: str = None) -> str:
+    """Delete a user variable by IDX or Name."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=deleteuservariable&idx={idx}")
+        resolved_idx = await _resolve_user_variable_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "User variable not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=deleteuservariable&idx={resolved_idx}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def get_device_history(idx: int, sensor_type: str = "light", time_range: str = "day") -> str:
+async def get_device_history(idx: int = None, name: str = None, sensor_type: str = "light", time_range: str = "day") -> str:
     """Get history log or graph for a device. sensor_type: 'light', 'text', 'temp', 'percentage', 'counter'. time_range (for graphs): 'day', 'month', 'year'."""
-    url = f"{DOMOTICZ_API_URL}?type=command"
-    if sensor_type == "light":
-        url += f"&param=getlightlog&idx={idx}"
-    elif sensor_type == "text":
-        url += f"&param=gettextlog&idx={idx}"
-    else:
-        url += f"&param=graph&sensor={sensor_type}&idx={idx}&range={time_range}"
-        
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+            
+        url = f"{DOMOTICZ_API_URL}?type=command"
+        if sensor_type == "light":
+            url += f"&param=getlightlog&idx={resolved_idx}"
+        elif sensor_type == "text":
+            url += f"&param=gettextlog&idx={resolved_idx}"
+        else:
+            url += f"&param=graph&sensor={sensor_type}&idx={resolved_idx}&range={time_range}"
+            
         response = await client.get(url)
         response.raise_for_status()
         return response.text
@@ -482,34 +564,54 @@ async def get_users() -> str:
         return response.text
 
 @mcp.tool()
-async def set_color_brightness(idx: int, hue: int, brightness: int, iswhite: bool = False) -> str:
-    """Set color and brightness for an RGB/color light by IDX in Domoticz."""
+async def set_color_brightness(hue: int, brightness: int, idx: int = None, name: str = None, iswhite: bool = False) -> str:
+    """Set color and brightness for an RGB/color light by IDX or Name in Domoticz."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setcolbrightnessvalue&idx={idx}&hue={hue}&brightness={brightness}&iswhite={str(iswhite).lower()}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setcolbrightnessvalue&idx={resolved_idx}&hue={hue}&brightness={brightness}&iswhite={str(iswhite).lower()}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def set_color_temperature(idx: int, kelvin: int) -> str:
-    """Set color temperature (Kelvin) for a light by IDX in Domoticz. kelvin: 0..100."""
+async def set_color_temperature(kelvin: int, idx: int = None, name: str = None) -> str:
+    """Set color temperature (Kelvin) for a light by IDX or Name in Domoticz. kelvin: 0..100."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setkelvinlevel&idx={idx}&kelvin={kelvin}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setkelvinlevel&idx={resolved_idx}&kelvin={kelvin}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def rename_device(idx: int, name: str) -> str:
-    """Rename a device by IDX."""
+async def rename_device(new_name: str, idx: int = None, old_name: str = None) -> str:
+    """Rename a device by IDX or its old Name."""
+    if idx is None and old_name is None:
+        return '{"status": "error", "message": "Must provide either idx or old_name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=renamedevice&name={urllib.parse.quote(name)}&idx={idx}")
+        resolved_idx = await _resolve_device_idx(client, idx, old_name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=renamedevice&name={urllib.parse.quote(new_name)}&idx={resolved_idx}")
         response.raise_for_status()
         return response.text
 
 @mcp.tool()
-async def delete_device(idx: int) -> str:
-    """Delete (or hide) a device by IDX."""
+async def delete_device(idx: int = None, name: str = None) -> str:
+    """Delete (or hide) a device by IDX or Name."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setused&used=false&idx={idx}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setused&used=false&idx={resolved_idx}")
         response.raise_for_status()
         return response.text
 
@@ -522,10 +624,15 @@ async def create_virtual_sensor(hw_idx: int, sensorname: str, sensortype: int) -
         return response.text
 
 @mcp.tool()
-async def update_device_value(idx: int, nvalue: int = 0, svalue: str = "") -> str:
-    """Update a sensor/device value manually. nvalue is integer value, svalue is string value."""
+async def update_device_value(idx: int = None, name: str = None, nvalue: int = 0, svalue: str = "") -> str:
+    """Update a sensor/device value manually. nvalue is integer value, svalue is string value. Provide IDX or Name."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=udevice&idx={idx}&nvalue={nvalue}&svalue={urllib.parse.quote(svalue)}")
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=udevice&idx={resolved_idx}&nvalue={nvalue}&svalue={urllib.parse.quote(svalue)}")
         response.raise_for_status()
         return response.text
 
@@ -570,10 +677,15 @@ async def set_security_status(secstatus: int, seccode: str) -> str:
         return response.text
 
 @mcp.tool()
-async def get_scene_devices(idx: int) -> str:
-    """List all devices belonging to a specific scene/group."""
+async def get_scene_devices(idx: int = None, name: str = None) -> str:
+    """List all devices belonging to a specific scene/group by IDX or Name."""
+    if idx is None and name is None:
+        return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenedevices&idx={idx}&isscene=true")
+        resolved_idx = await _resolve_scene_idx(client, idx, name)
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Scene not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenedevices&idx={resolved_idx}&isscene=true")
         response.raise_for_status()
         return response.text
 
@@ -606,6 +718,17 @@ async def get_device_resource(idx: int) -> str:
     """Read the current state of a specific Domoticz device."""
     async with create_client() as client:
         response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://device/name/{name}")
+async def get_device_by_name_resource(name: str) -> str:
+    """Read the current state of a specific Domoticz device by name."""
+    async with create_client() as client:
+        resolved_idx = await _resolve_device_idx(client, name=urllib.parse.unquote(name))
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Device not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={resolved_idx}")
         response.raise_for_status()
         return response.text
 
@@ -657,6 +780,17 @@ async def get_user_variable_resource(idx: int) -> str:
         response.raise_for_status()
         return response.text
 
+@mcp.resource("domoticz://user-variable/name/{name}")
+async def get_user_variable_by_name_resource(name: str) -> str:
+    """Read a specific Domoticz user variable by name."""
+    async with create_client() as client:
+        resolved_idx = await _resolve_user_variable_idx(client, name=urllib.parse.unquote(name))
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "User variable not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getuservariable&idx={resolved_idx}")
+        response.raise_for_status()
+        return response.text
+
 @mcp.resource("domoticz://scenes")
 async def get_scenes_resource() -> str:
     """Read the list of all Domoticz scenes and groups."""
@@ -670,6 +804,17 @@ async def get_scene_resource(idx: int) -> str:
     """Read the devices belonging to a specific Domoticz scene/group."""
     async with create_client() as client:
         response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenedevices&idx={idx}&isscene=true")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://scene/name/{name}")
+async def get_scene_by_name_resource(name: str) -> str:
+    """Read the devices belonging to a specific Domoticz scene/group by name."""
+    async with create_client() as client:
+        resolved_idx = await _resolve_scene_idx(client, name=urllib.parse.unquote(name))
+        if resolved_idx is None:
+            return f'{{"status": "error", "message": "Scene not found"}}'
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenedevices&idx={resolved_idx}&isscene=true")
         response.raise_for_status()
         return response.text
 
@@ -698,9 +843,11 @@ async def get_event_resource(event_id: int) -> str:
         return response.text
 
 @mcp.prompt()
-def troubleshoot_device(idx: int) -> str:
-    """Prompt to help troubleshoot a specific Domoticz device by IDX."""
-    return f"Please help me troubleshoot my Domoticz device with IDX {idx}. Start by reading the device's state using the `domoticz://device/{idx}` resource, and check the system log using the `domoticz://log` resource for any recent errors related to this device. Analyze the state and logs to tell me what might be wrong."
+def troubleshoot_device(idx: int = None, name: str = None) -> str:
+    """Prompt to help troubleshoot a specific Domoticz device by IDX or Name."""
+    target = f"IDX {idx}" if idx is not None else f"name '{name}'"
+    resource = f"domoticz://device/{idx}" if idx is not None else f"domoticz://device/name/{urllib.parse.quote(name)}"
+    return f"Please help me troubleshoot my Domoticz device with {target}. Start by reading the device's state using the `{resource}` resource, and check the system log using the `domoticz://log` resource for any recent errors related to this device. Analyze the state and logs to tell me what might be wrong."
 
 @mcp.prompt()
 def summarize_home() -> str:
