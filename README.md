@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 
 ## Features
 
-The server exposes both **Tools** (for active control and modifications) and **Resources** (for read-only contextual awareness).
+The server exposes **Tools** (for active control and modifications), **Resources** (for read-only contextual awareness), and **Prompts** (for guided interaction templates).
 
 ### Tools (Actions)
 - **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, control blinds, and manage RGB/color lighting (brightness, hue, color temperature).
@@ -28,6 +28,11 @@ The server exposes both **Tools** (for active control and modifications) and **R
 - **`domoticz://log`**: Read the current Domoticz system log.
 - **`domoticz://security`**: Read the current status of the security panel.
 - **`domoticz://settings`**: Read global Domoticz settings and configuration.
+
+### Prompts (Templates)
+- **`summarize_home`**: A prompt that instructs the AI to read the home state (devices, temperature, open doors) and provide a human-readable summary.
+- **`troubleshoot_device`**: A template that asks for a device `idx` and instructs the AI to read the device state and system logs to diagnose issues.
+- **`analyze_automations`**: Instructs the AI to review your internal event scripts for logic flaws or optimizations.
 
 ## Prerequisites
 

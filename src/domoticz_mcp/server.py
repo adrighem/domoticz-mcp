@@ -665,6 +665,21 @@ async def get_event_resource(event_id: int) -> str:
         response.raise_for_status()
         return response.text
 
+@mcp.prompt()
+def troubleshoot_device(idx: int) -> str:
+    """Prompt to help troubleshoot a specific Domoticz device by IDX."""
+    return f"Please help me troubleshoot my Domoticz device with IDX {idx}. Start by reading the device's state using the `domoticz://device/{idx}` resource, and check the system log using the `domoticz://log` resource for any recent errors related to this device. Analyze the state and logs to tell me what might be wrong."
+
+@mcp.prompt()
+def summarize_home() -> str:
+    """Prompt to summarize the current state of the smart home."""
+    return "Please provide a human-readable summary of my smart home's current state. Use the `domoticz://devices` resource to check what devices are currently on, off, open, or closed. Highlight any active lights, open doors/windows, and the current temperatures."
+
+@mcp.prompt()
+def analyze_automations() -> str:
+    """Prompt to analyze Domoticz event scripts for logic flaws."""
+    return "Please analyze my Domoticz automations and event scripts for any logic flaws or potential optimizations. Start by reading the `domoticz://events` resource to get an overview of the scripts, then use the `domoticz://event/{event_id}` resource to read specific scripts you want to investigate."
+
 import argparse
 
 def main():
