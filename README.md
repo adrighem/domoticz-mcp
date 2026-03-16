@@ -4,17 +4,30 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 
 ## Features
 
+The server exposes both **Tools** (for active control and modifications) and **Resources** (for read-only contextual awareness).
+
+### Tools (Actions)
 - **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, control blinds, and manage RGB/color lighting (brightness, hue, color temperature).
 - **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values.
-- **Device Information:** Retrieve states for all devices or specific ones.
-- **Rooms and Scenes:** List rooms (Room Plans), get devices within rooms, control scenes/groups, and list devices in scenes.
+- **Rooms and Scenes:** Control scenes/groups.
 - **User Variables:** Read, add, update, and delete Domoticz user variables.
-- **History and Logs:** Access device history graphs and text/light logs. Read system logs and add custom log messages.
+- **History and Logs:** Access device history graphs and text/light logs. Retrieve system logs and add custom log messages.
 - **System Information:** Get Domoticz instance version, global settings, hardware, sun times, users, and internal event scripts/rules.
 - **Security:** Get and set the Domoticz security panel status.
 - **Notifications:** Send notifications through the Domoticz notification subsystem.
 - **Event Management:** Get, create, and update internal event scripts (Blockly, Lua, dzVents, Python).
 - **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans.
+
+### Resources (Context)
+- **`domoticz://devices`**: Read the current state of all Domoticz devices.
+- **`domoticz://device/{idx}`**: Read the current state of a specific device.
+- **`domoticz://rooms` & `domoticz://room/{idx}`**: Read configured rooms and list devices within them.
+- **`domoticz://scenes` & `domoticz://scene/{idx}`**: Read configured scenes and the list of devices belonging to a specific scene.
+- **`domoticz://user-variables` & `domoticz://user-variable/{idx}`**: Read the list of all or specific Domoticz user variables.
+- **`domoticz://events` & `domoticz://event/{event_id}`**: Read the overview and specific source code of event scripts.
+- **`domoticz://log`**: Read the current Domoticz system log.
+- **`domoticz://security`**: Read the current status of the security panel.
+- **`domoticz://settings`**: Read global Domoticz settings and configuration.
 
 ## Prerequisites
 
