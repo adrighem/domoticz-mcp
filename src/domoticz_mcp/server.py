@@ -465,6 +465,118 @@ async def get_users() -> str:
         response.raise_for_status()
         return response.text
 
+@mcp.tool()
+async def set_color_brightness(idx: int, hue: int, brightness: int, iswhite: bool = False) -> str:
+    """Set color and brightness for an RGB/color light by IDX in Domoticz."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setcolbrightnessvalue&idx={idx}&hue={hue}&brightness={brightness}&iswhite={str(iswhite).lower()}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def set_color_temperature(idx: int, kelvin: int) -> str:
+    """Set color temperature (Kelvin) for a light by IDX in Domoticz. kelvin: 0..100."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setkelvinlevel&idx={idx}&kelvin={kelvin}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def rename_device(idx: int, name: str) -> str:
+    """Rename a device by IDX."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=renamedevice&name={urllib.parse.quote(name)}&idx={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def delete_device(idx: int) -> str:
+    """Delete (or hide) a device by IDX."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setused&used=false&idx={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def create_virtual_sensor(hw_idx: int, sensorname: str, sensortype: int) -> str:
+    """Create a virtual sensor. hw_idx is the IDX of the dummy hardware."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=createvirtualsensor&idx={hw_idx}&sensorname={urllib.parse.quote(sensorname)}&sensortype={sensortype}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def update_device_value(idx: int, nvalue: int = 0, svalue: str = "") -> str:
+    """Update a sensor/device value manually. nvalue is integer value, svalue is string value."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=udevice&idx={idx}&nvalue={nvalue}&svalue={urllib.parse.quote(svalue)}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_log(lastlogtime: int = 0, loglevel: int = 268435455) -> str:
+    """Retrieve the main system log. lastlogtime is seconds since epoch, loglevel is bitmask."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime={lastlogtime}&loglevel={loglevel}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def add_log_message(message: str, level: int = 2) -> str:
+    """Add a custom message to the Domoticz system log. level: 1=normal, 2=status, 4=error."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=addlogmessage&message={urllib.parse.quote(message)}&level={level}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def send_notification(subject: str, body: str) -> str:
+    """Send a notification through Domoticz notification subsystems."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=sendnotification&subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_security_status() -> str:
+    """Get the current status of the security panel."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getsecstatus")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def set_security_status(secstatus: int, seccode: str) -> str:
+    """Set the security panel status. secstatus: 0=Disarm, 1=Arm Home, 2=Arm Away."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=setsecstatus&secstatus={secstatus}&seccode={urllib.parse.quote(seccode)}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.tool()
+async def get_scene_devices(idx: int) -> str:
+    """List all devices belonging to a specific scene/group."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenedevices&idx={idx}&isscene=true")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://log")
+async def get_log_resource() -> str:
+    """Read the current Domoticz system log."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime=0&loglevel=268435455")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://security")
+async def get_security_resource() -> str:
+    """Read the current status of the security panel."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getsecstatus")
+        response.raise_for_status()
+        return response.text
+
 @mcp.resource("domoticz://devices")
 async def get_all_devices_resource() -> str:
     """Read the current state of all Domoticz devices."""
@@ -510,6 +622,30 @@ async def get_user_variable_resource(idx: int) -> str:
     """Read a specific Domoticz user variable."""
     async with create_client() as client:
         response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getuservariable&idx={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://scenes")
+async def get_scenes_resource() -> str:
+    """Read the list of all Domoticz scenes and groups."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenes")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://scene/{idx}")
+async def get_scene_resource(idx: int) -> str:
+    """Read the devices belonging to a specific Domoticz scene/group."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenedevices&idx={idx}&isscene=true")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://settings")
+async def get_settings_resource() -> str:
+    """Read global Domoticz settings and configuration."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getsettings")
         response.raise_for_status()
         return response.text
 

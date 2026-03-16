@@ -4,12 +4,15 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 
 ## Features
 
-- **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, and control blinds.
+- **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, control blinds, and manage RGB/color lighting (brightness, hue, color temperature).
+- **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values.
 - **Device Information:** Retrieve states for all devices or specific ones.
-- **Rooms and Scenes:** List rooms (Room Plans), get devices within rooms, and control scenes/groups.
+- **Rooms and Scenes:** List rooms (Room Plans), get devices within rooms, control scenes/groups, and list devices in scenes.
 - **User Variables:** Read, add, update, and delete Domoticz user variables.
-- **History and Logs:** Access device history graphs and text/light logs.
+- **History and Logs:** Access device history graphs and text/light logs. Read system logs and add custom log messages.
 - **System Information:** Get Domoticz instance version, global settings, hardware, sun times, users, and internal event scripts/rules.
+- **Security:** Get and set the Domoticz security panel status.
+- **Notifications:** Send notifications through the Domoticz notification subsystem.
 - **Event Management:** Get, create, and update internal event scripts (Blockly, Lua, dzVents, Python).
 - **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans.
 
