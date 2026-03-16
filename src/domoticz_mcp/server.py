@@ -593,6 +593,14 @@ async def get_device_resource(idx: int) -> str:
         response.raise_for_status()
         return response.text
 
+@mcp.resource("domoticz://device/{device_type}/{subtype}/{idx}")
+async def get_device_resource_detailed(device_type: str, subtype: str, idx: int) -> str:
+    """Read the current state of a specific Domoticz device using a descriptive URI."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={idx}")
+        response.raise_for_status()
+        return response.text
+
 @mcp.resource("domoticz://rooms")
 async def get_rooms_resource() -> str:
     """Read the list of all Domoticz rooms (Room Plans)."""

@@ -20,7 +20,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ### Resources (Context)
 - **`domoticz://devices`**: Read the current state of all Domoticz devices.
-- **`domoticz://device/{idx}`**: Read the current state of a specific device.
+- **`domoticz://device/{idx}`** or **`domoticz://device/{type}/{subtype}/{idx}`**: Read the current state of a specific device.
 - **`domoticz://rooms` & `domoticz://room/{idx}`**: Read configured rooms and list devices within them.
 - **`domoticz://scenes` & `domoticz://scene/{idx}`**: Read configured scenes and the list of devices belonging to a specific scene.
 - **`domoticz://user-variables` & `domoticz://user-variable/{idx}`**: Read the list of all or specific Domoticz user variables.
