@@ -286,10 +286,26 @@ async def get_rooms() -> str:
         return response.text
 
 @mcp.tool()
-async def get_room_devices(idx: int) -> str:
-    """Get all devices in a specific room by room IDX from Domoticz."""
+async def get_room_devices(idx: int = None, room_name: str = None) -> str:
+    """Get all devices and their current states in a specific room. Provide either idx or room_name."""
+    if idx is None and room_name is None:
+        return '{"status": "error", "message": "Must provide either idx or room_name"}'
+        
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getplandevices&idx={idx}")
+        if idx is None:
+            plans_resp = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true")
+            plans_resp.raise_for_status()
+            plans_data = plans_resp.json()
+            for plan in plans_data.get("result", []):
+                if plan.get("Name", "").lower() == room_name.lower():
+                    idx = plan.get("idx")
+                    break
+            
+            if idx is None:
+                return f'{{"status": "error", "message": "Room \'{room_name}\' not found"}}'
+
+        # Using plan=idx returns the full status of all devices in the room, rather than just their IDs
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&plan={idx}")
         response.raise_for_status()
         return response.text
 
@@ -611,9 +627,17 @@ async def get_rooms_resource() -> str:
 
 @mcp.resource("domoticz://room/{idx}")
 async def get_room_resource(idx: int) -> str:
-    """Read the devices in a specific Domoticz room."""
+    """Read the current states of all devices in a specific Domoticz room."""
     async with create_client() as client:
-        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getplandevices&idx={idx}")
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&plan={idx}")
+        response.raise_for_status()
+        return response.text
+
+@mcp.resource("domoticz://room/{room_name}/{idx}")
+async def get_room_resource_detailed(room_name: str, idx: int) -> str:
+    """Read the current states of all devices in a specific Domoticz room using a descriptive URI."""
+    async with create_client() as client:
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&plan={idx}")
         response.raise_for_status()
         return response.text
 
