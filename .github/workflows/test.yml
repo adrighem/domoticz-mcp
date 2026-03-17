@@ -27,4 +27,16 @@ jobs:
           pip install -e ".[dev]"
           
       - name: Run tests
+        run: pytest > pytest-output-${{ matrix.python-version }}.log 2>&1 || true
+        
+      - name: Show tests output
+        run: cat pytest-output-${{ matrix.python-version }}.log
+        
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.python-version }}
+          path: pytest-output-${{ matrix.python-version }}.log
+          
+      - name: Fail if tests failed
         run: pytest
