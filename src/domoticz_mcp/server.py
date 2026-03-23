@@ -32,9 +32,10 @@ DOMOTICZ_USERNAME = os.environ.get("DOMOTICZ_USERNAME")
 DOMOTICZ_PASSWORD = os.environ.get("DOMOTICZ_PASSWORD")
 DOMOTICZ_CLIENT_ID = os.environ.get("DOMOTICZ_CLIENT_ID", os.environ.get("DOMOTICZ_CLIENTID"))
 DOMOTICZ_CLIENT_SECRET = os.environ.get("DOMOTICZ_CLIENT_SECRET", os.environ.get("DOMOTICZ_CLIENTSECRET"))
+DOMOTICZ_OAUTH_TOKEN = os.environ.get("DOMOTICZ_OAUTH_TOKEN")
 
 TOKEN_FILE = os.path.expanduser("~/.config/domoticz-mcp/token.json")
-_oauth_token_cache: Optional[str] = None
+_oauth_token_cache: Optional[str] = DOMOTICZ_OAUTH_TOKEN
 
 def _do_interactive_oauth_flow():
     code = None
@@ -863,8 +864,17 @@ import argparse
 
 def main():
     parser = argparse.ArgumentParser(description="Domoticz MCP Server")
-    parser.parse_args()
-    mcp.run()
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"], help="Transport to use")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to for SSE")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to for SSE")
+    args = parser.parse_args()
+    
+    if args.transport == "sse":
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="sse")
+    else:
+        mcp.run()
 
 if __name__ == "__main__":
     main()

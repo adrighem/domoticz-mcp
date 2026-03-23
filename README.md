@@ -45,6 +45,22 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ## Installation
 
+### Docker Installation
+
+You can run the server via Docker. By default, the Docker image runs the server in `sse` (HTTP) mode on port 8000.
+
+```bash
+docker run -d \
+  --name domoticz-mcp \
+  -p 8000:8000 \
+  -e DOMOTICZ_URL="http://192.168.1.100:8080" \
+  -e DOMOTICZ_USERNAME="your_username" \
+  -e DOMOTICZ_PASSWORD="your_password" \
+  ghcr.io/YOUR_GITHUB_USERNAME/domoticz-mcp:latest
+```
+
+*Note: For the OAuth2 token flow to work and persist in Docker without interactive browser prompts, see the OAuth / API Token section below on how to mount the token file or use headless authentication.*
+
 ### Using `uv` (Recommended)
 
 If you use `uv`, you can run the server directly from the source repository without installing it globally:
@@ -76,7 +92,7 @@ The server requires configuration to connect to your Domoticz instance. These ar
 You can authenticate the MCP server with Domoticz using either an **OAuth/API Token** (Recommended) or **Basic Auth**. 
 
 #### Option 1: OAuth / API Token (Recommended)
-This approach uses an OAuth2 token and is generally more secure, as you can revoke the token at any time without changing your password. The server supports an interactive authentication flow so you do not need to provide your username and password in the configuration.
+This approach uses an OAuth2 token and is generally more secure, as you can revoke the token at any time without changing your password.
 
 1. In the Domoticz UI, go to **Setup** -> **More Options** -> **Applications**.
 2. Click **Add Application** and configure:
@@ -87,9 +103,35 @@ This approach uses an OAuth2 token and is generally more secure, as you can revo
    - `DOMOTICZ_CLIENT_ID`: Your Application's Client ID.
    - `DOMOTICZ_CLIENT_SECRET`: Your Application's Client Secret.
 
-When the server runs for the first time, it will print an authorization URL to the console/stderr and attempt to open your browser. After you log in and approve the request, it will save the token to `~/.config/domoticz-mcp/token.json` for future use.
+**Interactive Flow (Desktop/CLI):**
+When the server runs for the first time natively on your machine, it will print an authorization URL to the console/stderr and attempt to open your browser. After you log in and approve the request, it will save the token to `~/.config/domoticz-mcp/token.json` for future use.
 
-Alternatively, if you want to perform a headless login, you can provide `DOMOTICZ_USERNAME` and `DOMOTICZ_PASSWORD` alongside the Client ID and Secret to use the OAuth2 `password` grant, or you can provide a valid token directly via `DOMOTICZ_OAUTH_TOKEN`.
+**Headless Flow (Docker / Server Environments):**
+In a Docker container, the interactive browser flow is not possible. You have two options:
+1. **Password Grant (Easiest):** Provide `DOMOTICZ_USERNAME` and `DOMOTICZ_PASSWORD` *in addition to* the Client ID and Secret. The server will automatically perform a headless login to fetch the initial token.
+   ```bash
+   docker run -d \
+     --name domoticz-mcp \
+     -p 8000:8000 \
+     -e DOMOTICZ_URL="http://192.168.1.100:8080" \
+     -e DOMOTICZ_CLIENT_ID="your_client_id" \
+     -e DOMOTICZ_CLIENT_SECRET="your_client_secret" \
+     -e DOMOTICZ_USERNAME="your_username" \
+     -e DOMOTICZ_PASSWORD="your_password" \
+     ghcr.io/YOUR_GITHUB_USERNAME/domoticz-mcp:latest
+   ```
+2. **Mount Token File:** Run the server locally once to generate `~/.config/domoticz-mcp/token.json`, then mount that file into the Docker container:
+   ```bash
+   docker run -d \
+     --name domoticz-mcp \
+     -p 8000:8000 \
+     -e DOMOTICZ_URL="http://192.168.1.100:8080" \
+     -v ~/.config/domoticz-mcp:/app/.config/domoticz-mcp \
+     -e HOME="/app" \
+     ghcr.io/YOUR_GITHUB_USERNAME/domoticz-mcp:latest
+   ```
+
+Alternatively, you can provide a valid token directly via the `DOMOTICZ_OAUTH_TOKEN` environment variable.
 
 *Note: If you use a token, you can safely disable "Allow Basic-Auth authentication over plain HTTP" in the Domoticz security settings.*
 #### Option 2: Basic Auth
