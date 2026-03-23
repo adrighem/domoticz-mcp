@@ -864,15 +864,45 @@ import argparse
 
 def main():
     parser = argparse.ArgumentParser(description="Domoticz MCP Server")
-    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"], help="Transport to use")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to for SSE")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind to for SSE")
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http"], help="Transport to use")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to for SSE / HTTP")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to for SSE / HTTP")
     args = parser.parse_args()
     
     if args.transport == "sse":
+        import uvicorn
+        from starlette.middleware.cors import CORSMiddleware
+        
         mcp.settings.host = args.host
         mcp.settings.port = args.port
-        mcp.run(transport="sse")
+        
+        app = mcp.sse_app()
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        uvicorn.run(app, host=args.host, port=args.port)
+    elif args.transport == "streamable-http":
+        import uvicorn
+        from starlette.middleware.cors import CORSMiddleware
+        
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        
+        app = mcp.streamable_http_app()
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run()
 
