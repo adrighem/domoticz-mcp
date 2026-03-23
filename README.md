@@ -1,5 +1,8 @@
 # Domoticz MCP Server
 
+[![PyPI Version](https://img.shields.io/pypi/v/domoticz-mcp.svg)](https://pypi.org/project/domoticz-mcp/)
+[![Docker Image Version](https://img.shields.io/github/v/release/adrighem/domoticz-mcp?label=docker&logo=docker)](https://github.com/adrighem/domoticz-mcp/pkgs/container/domoticz-mcp)
+
 A Model Context Protocol (MCP) server for integrating with the [Domoticz](https://www.domoticz.com/) home automation system. This server provides tools to AI assistants (like Claude, Gemini, etc.) to view and control your smart home devices, scenes, user variables, and more.
 
 ## Features

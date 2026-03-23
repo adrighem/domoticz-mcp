@@ -19,6 +19,11 @@ dependencies = [
     "starlette"
 ]
 
+[project.urls]
+Homepage = "https://github.com/adrighem/domoticz-mcp"
+Repository = "https://github.com/adrighem/domoticz-mcp.git"
+Issues = "https://github.com/adrighem/domoticz-mcp/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest",
