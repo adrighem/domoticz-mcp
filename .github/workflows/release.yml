@@ -10,6 +10,7 @@ permissions:
   contents: write
   pull-requests: write
   id-token: write
+  issues: write
 
 jobs:
   release-please:
@@ -21,6 +22,19 @@ jobs:
         id: release
         with:
           release-type: python
+
+      - name: Close issues referenced in release
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BODY: ${{ steps.release.outputs.body }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "$RELEASE_BODY" | grep -oE '#[0-9]+' | tr -d '#' | sort -u | while read issue_number; do
+            echo "Attempting to close issue/PR #$issue_number"
+            gh issue close "$issue_number" --repo "$REPO" -c "Closed by release $TAG_NAME" || echo "Could not close $issue_number (may be a PR, already closed, or not an issue)"
+          done
 
   pypi-publish:
     name: Upload release to PyPI
