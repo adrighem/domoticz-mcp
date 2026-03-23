@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.1](https://github.com/adrighem/domoticz-mcp/compare/v0.1.0...v0.1.1) (2026-03-23)
+
+
+### Bug Fixes
+
+* Add CORS middleware and streamable-http transport for WebUI clients ([#3](https://github.com/adrighem/domoticz-mcp/issues/3)) ([d3279a7](https://github.com/adrighem/domoticz-mcp/commit/d3279a7db8a7bbf5af05345859e5f65c8d46f484))
+
+
+### Documentation
+
+* Document HTTP transport options and connection URLs ([94cd0df](https://github.com/adrighem/domoticz-mcp/commit/94cd0df2e59b85aee864505427f9967486ad5a10))
+
 ## 0.1.0 (2026-03-23)
 
 
