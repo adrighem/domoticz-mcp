@@ -48,6 +48,26 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ## Installation
 
+### Standard Python Installation (Linux, macOS, Windows)
+
+1. Clone or download this repository.
+2. Navigate to the project directory.
+3. Install the package using `pip`:
+
+```bash
+pip install .
+```
+
+This will install the `domoticz-mcp` command-line tool.
+
+### Using `uv` (Recommended)
+
+If you use `uv`, you can run the server directly from the source repository without installing it globally:
+
+```bash
+uv run --directory /path/to/domoticz-mcp domoticz-mcp
+```
+
 ### Docker Installation
 
 You can run the server via Docker. By default, the Docker image runs the server in `sse` (HTTP) mode on port 8000.
@@ -64,25 +84,24 @@ docker run -d \
 
 *Note: For the OAuth2 token flow to work and persist in Docker without interactive browser prompts, see the OAuth / API Token section below on how to mount the token file or use headless authentication.*
 
-### Using `uv` (Recommended)
+## Transport Options
 
-If you use `uv`, you can run the server directly from the source repository without installing it globally:
+The server supports three different transports for clients to connect with:
 
-```bash
-uv run --directory /path/to/domoticz-mcp domoticz-mcp
-```
-
-### Standard Python Installation (Linux, macOS, Windows)
-
-1. Clone or download this repository.
-2. Navigate to the project directory.
-3. Install the package using `pip`:
-
-```bash
-pip install .
-```
-
-This will install the `domoticz-mcp` command-line tool.
+1. **`stdio` (Default):** Standard input/output. This is what most desktop applications (like Claude Desktop and Gemini CLI) use.
+   ```bash
+   domoticz-mcp --transport stdio
+   ```
+2. **`sse` (HTTP Server-Sent Events):** Starts a web server that clients can connect to over HTTP. Ideal for web-based UIs and remote connections. Includes wide-open CORS headers.
+   ```bash
+   domoticz-mcp --transport sse --host 0.0.0.0 --port 8000
+   ```
+   **Connection URL for clients:** `http://<ip>:8000/sse`
+3. **`streamable-http` (Alternative HTTP):** Starts a web server using an alternative HTTP transport. Required by certain clients (like the llama.cpp WebUI) that expect a single POST endpoint instead of an SSE stream.
+   ```bash
+   domoticz-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+   ```
+   **Connection URL for clients:** `http://<ip>:8000/mcp`
 
 ## Configuration
 
