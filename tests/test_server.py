@@ -98,3 +98,45 @@ async def test_missing_params():
     response = await toggle_switch()
     assert json.loads(response)["status"] == "error"
     assert "Must provide either idx or name" in json.loads(response)["message"]
+
+def test_dns_rebinding_protection_disabled():
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.testclient import TestClient
+    
+    # Create a fresh FastMCP instance with disabled DNS protection just like in server.py
+    mcp_test = FastMCP("Test1", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+    app = mcp_test.streamable_http_app()
+    
+    # Positive test: Valid Host header should not be rejected with 421
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        response = client.post("/mcp", headers={"Host": "127.0.0.1", "Content-Type": "application/json"})
+        assert response.status_code != 421
+
+def test_dns_rebinding_protection_disabled_negative():
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.testclient import TestClient
+    
+    # Need a fresh instance per TestClient context
+    mcp_test = FastMCP("Test2", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+    app = mcp_test.streamable_http_app()
+
+    # Negative test (verifying our disable fix works): Invalid Host header should ALSO not be rejected with 421
+    with TestClient(app, base_url="http://192.168.100.100") as client:
+        response = client.post("/mcp", headers={"Host": "192.168.100.100", "Content-Type": "application/json"})
+        assert response.status_code != 421
+
+def test_dns_rebinding_protection_enabled_rejects():
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.testclient import TestClient
+    
+    # Explicitly enable it to verify the negative case behaves as expected
+    strict_mcp = FastMCP("Test3", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=["127.0.0.1:*"]))
+    app = strict_mcp.streamable_http_app()
+    
+    with TestClient(app, base_url="http://192.168.100.100") as client:
+        response = client.post("/mcp", headers={"Host": "192.168.100.100", "Content-Type": "application/json"})
+        # Should be rejected with 421
+        assert response.status_code == 421
