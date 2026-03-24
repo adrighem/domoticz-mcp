@@ -24,18 +24,18 @@ from typing import Optional
 
 mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), stateless_http=True)
 
-DOMOTICZ_BASE_URL = os.environ.get("DOMOTICZ_URL", "https://xmpp.vanadrighem.eu/domoticz")
+DOMOTICZ_BASE_URL = os.environ.get("DOMOTICZ_URL", "https://xmpp.vanadrighem.eu/domoticz").strip('\'"')
 if not DOMOTICZ_BASE_URL.startswith(('http://', 'https://')):
     DOMOTICZ_BASE_URL = 'http://' + DOMOTICZ_BASE_URL
 if DOMOTICZ_BASE_URL.endswith('/json.htm'):
     DOMOTICZ_BASE_URL = DOMOTICZ_BASE_URL[:-9]
     
 DOMOTICZ_API_URL = f"{DOMOTICZ_BASE_URL}/json.htm"
-DOMOTICZ_USERNAME = os.environ.get("DOMOTICZ_USERNAME")
-DOMOTICZ_PASSWORD = os.environ.get("DOMOTICZ_PASSWORD")
-DOMOTICZ_CLIENT_ID = os.environ.get("DOMOTICZ_CLIENT_ID", os.environ.get("DOMOTICZ_CLIENTID"))
-DOMOTICZ_CLIENT_SECRET = os.environ.get("DOMOTICZ_CLIENT_SECRET", os.environ.get("DOMOTICZ_CLIENTSECRET"))
-DOMOTICZ_OAUTH_TOKEN = os.environ.get("DOMOTICZ_OAUTH_TOKEN")
+DOMOTICZ_USERNAME = (os.environ.get("DOMOTICZ_USERNAME") or "").strip('\'"') or None
+DOMOTICZ_PASSWORD = (os.environ.get("DOMOTICZ_PASSWORD") or "").strip('\'"') or None
+DOMOTICZ_CLIENT_ID = (os.environ.get("DOMOTICZ_CLIENT_ID") or os.environ.get("DOMOTICZ_CLIENTID") or "").strip('\'"') or None
+DOMOTICZ_CLIENT_SECRET = (os.environ.get("DOMOTICZ_CLIENT_SECRET") or os.environ.get("DOMOTICZ_CLIENTSECRET") or "").strip('\'"') or None
+DOMOTICZ_OAUTH_TOKEN = (os.environ.get("DOMOTICZ_OAUTH_TOKEN") or "").strip('\'"') or None
 
 TOKEN_FILE = os.path.expanduser("~/.config/domoticz-mcp/token.json")
 _oauth_token_cache: Optional[str] = DOMOTICZ_OAUTH_TOKEN
