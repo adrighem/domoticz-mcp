@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2](https://github.com/adrighem/domoticz-mcp/compare/v0.1.1...v0.1.2) (2026-03-23)
+
+
+### Bug Fixes
+
+* disable FastMCP DNS rebinding protection to allow LAN connections ([7bab344](https://github.com/adrighem/domoticz-mcp/commit/7bab344c1de614411ab5e297fa744f1cbc85e0f5))
+
+
+### Documentation
+
+* add project logic for issue management ([9b7e9c7](https://github.com/adrighem/domoticz-mcp/commit/9b7e9c7fd24a14d8f4ee765506ed625146f3798b))
+
 ## [0.1.1](https://github.com/adrighem/domoticz-mcp/compare/v0.1.0...v0.1.1) (2026-03-23)
 
 
