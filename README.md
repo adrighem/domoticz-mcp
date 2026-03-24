@@ -1,5 +1,9 @@
 # Domoticz MCP Server
 
+<div align="center">
+  <img src="logo.svg" alt="domoticz-mcp logo" width="200" height="200" />
+</div>
+
 [![PyPI Version](https://img.shields.io/pypi/v/domoticz-mcp.svg)](https://pypi.org/project/domoticz-mcp/)
 [![Docker Image Version](https://img.shields.io/github/v/release/adrighem/domoticz-mcp?label=docker&logo=docker)](https://github.com/adrighem/domoticz-mcp/pkgs/container/domoticz-mcp)
 
