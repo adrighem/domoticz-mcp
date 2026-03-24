@@ -22,7 +22,7 @@ import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
 
-mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), stateless_http=True)
 
 DOMOTICZ_BASE_URL = os.environ.get("DOMOTICZ_URL", "https://xmpp.vanadrighem.eu/domoticz")
 if DOMOTICZ_BASE_URL.endswith('/json.htm'):

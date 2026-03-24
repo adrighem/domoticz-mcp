@@ -27,3 +27,4 @@ wheels/
 .DS_Store
 test_oauth.py
 test_auth.py
+.coverage
