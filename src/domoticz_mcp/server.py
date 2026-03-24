@@ -25,6 +25,8 @@ from typing import Optional
 mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), stateless_http=True)
 
 DOMOTICZ_BASE_URL = os.environ.get("DOMOTICZ_URL", "https://xmpp.vanadrighem.eu/domoticz")
+if not DOMOTICZ_BASE_URL.startswith(('http://', 'https://')):
+    DOMOTICZ_BASE_URL = 'http://' + DOMOTICZ_BASE_URL
 if DOMOTICZ_BASE_URL.endswith('/json.htm'):
     DOMOTICZ_BASE_URL = DOMOTICZ_BASE_URL[:-9]
     
