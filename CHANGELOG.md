@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.3](https://github.com/adrighem/domoticz-mcp/compare/v0.1.2...v0.1.3) (2026-03-24)
+
+
+### Bug Fixes
+
+* ensure DOMOTICZ_URL has a valid http/https prefix ([b09aef5](https://github.com/adrighem/domoticz-mcp/commit/b09aef55ce3141d726b316ff6d1db6b39d322867))
+
+
+### Documentation
+
+* add project logo ([e2641e4](https://github.com/adrighem/domoticz-mcp/commit/e2641e464a73bbeaf56506e3d4684adea2175e7f))
+
 ## [0.1.2](https://github.com/adrighem/domoticz-mcp/compare/v0.1.1...v0.1.2) (2026-03-23)
 
 
