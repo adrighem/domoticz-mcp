@@ -98,76 +98,66 @@ The server supports three different transports for clients to connect with:
    ```
 2. **`sse` (HTTP Server-Sent Events):** Starts a web server that clients can connect to over HTTP. Ideal for web-based UIs and remote connections. Includes wide-open CORS headers.
    ```bash
-   domoticz-mcp --transport sse --host 0.0.0.0 --port 8000
+   domoticz-mcp --transport sse --port 8000
    ```
-   **Connection URL for clients:** `http://<ip>:8000/sse`
+   **Connection URL for clients:** `http://localhost:8000/sse`
 3. **`streamable-http` (Alternative HTTP):** Starts a web server using an alternative HTTP transport. Required by certain clients (like the llama.cpp WebUI) that expect a single POST endpoint instead of an SSE stream.
    ```bash
-   domoticz-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+   domoticz-mcp --transport streamable-http --port 8000
    ```
-   **Connection URL for clients:** `http://<ip>:8000/mcp`
+   **Connection URL for clients:** `http://localhost:8000/mcp`
 
 ## Configuration
 
-The server requires configuration to connect to your Domoticz instance. These are provided as environment variables.
+The server can be configured via environment variables or command-line arguments. **Environment variables take precedence over command-line arguments**, which in turn override the defaults. This is designed to facilitate easy configuration in Docker environments.
 
-- `DOMOTICZ_URL`: The base URL of your Domoticz instance (e.g., `http://192.168.1.100:8080`). Defaults to `https://xmpp.vanadrighem.eu/domoticz` if not set.
+### General Options
+
+| Option | Environment Variable | Default | Description |
+|--------|----------------------|---------|-------------|
+| `--transport` | `DOMOTICZ_MCP_TRANSPORT`, `TRANSPORT` | `stdio` | Transport to use (`stdio`, `sse`, or `streamable-http`) |
+| `--host` | `DOMOTICZ_MCP_HOST`, `HOST` | `127.0.0.1` | Host to bind to for SSE / HTTP |
+| `--port` | `DOMOTICZ_MCP_PORT`, `PORT` | `8000` | Port to bind to for SSE / HTTP |
+| `--domoticz-url` | `DOMOTICZ_URL` | `https://xmpp.vanadrighem.eu/domoticz` | Base URL of your Domoticz instance |
+| `--token-file` | `DOMOTICZ_MCP_TOKEN_FILE`, `TOKEN_FILE` | `~/.config/domoticz-mcp/token.json` | Path to OAuth token storage file |
 
 ### Authentication Options
 
-You can authenticate the MCP server with Domoticz using either an **OAuth/API Token** (Recommended) or **Basic Auth**. 
+You can authenticate the MCP server with Domoticz using either an **OAuth/API Token** (Recommended) or **Basic Auth**.
 
 #### Option 1: OAuth / API Token (Recommended)
-This approach uses an OAuth2 token and is generally more secure, as you can revoke the token at any time without changing your password.
+This approach uses an OAuth2 token and is generally more secure.
+
+| Option | Environment Variable | Description |
+|--------|----------------------|-------------|
+| `--domoticz-client-id` | `DOMOTICZ_CLIENT_ID`, `DOMOTICZ_CLIENTID` | Your Application's Client ID |
+| `--domoticz-client-secret` | `DOMOTICZ_CLIENT_SECRET`, `DOMOTICZ_CLIENTSECRET` | Your Application's Client Secret |
+| `--domoticz-oauth-token` | `DOMOTICZ_OAUTH_TOKEN` | Direct OAuth2 access token (skips flow) |
 
 1. In the Domoticz UI, go to **Setup** -> **More Options** -> **Applications**.
 2. Click **Add Application** and configure:
    - **Name**: e.g., `MCP Server`
    - **isPublic**: Check this if you want to use Key-Pair, or leave unchecked for a Shared Secret.
 3. Note the generated **Client ID** and **Client Secret**.
-4. Configure the following environment variables:
-   - `DOMOTICZ_CLIENT_ID`: Your Application's Client ID.
-   - `DOMOTICZ_CLIENT_SECRET`: Your Application's Client Secret.
 
 **Interactive Flow (Desktop/CLI):**
-When the server runs for the first time natively on your machine, it will print an authorization URL to the console/stderr and attempt to open your browser. After you log in and approve the request, it will save the token to `~/.config/domoticz-mcp/token.json` for future use.
+When the server runs for the first time natively on your machine, it will print an authorization URL to the console/stderr and attempt to open your browser. After you approve the request, it will save the token to the `token-file` for future use.
 
 **Headless Flow (Docker / Server Environments):**
-In a Docker container, the interactive browser flow is not possible. You have two options:
-1. **Password Grant (Easiest):** Provide `DOMOTICZ_USERNAME` and `DOMOTICZ_PASSWORD` *in addition to* the Client ID and Secret. The server will automatically perform a headless login to fetch the initial token.
-   ```bash
-   docker run -d \
-     --name domoticz-mcp \
-     -p 8000:8000 \
-     -e DOMOTICZ_URL="http://192.168.1.100:8080" \
-     -e DOMOTICZ_CLIENT_ID="your_client_id" \
-     -e DOMOTICZ_CLIENT_SECRET="your_client_secret" \
-     -e DOMOTICZ_USERNAME="your_username" \
-     -e DOMOTICZ_PASSWORD="your_password" \
-     ghcr.io/YOUR_GITHUB_USERNAME/domoticz-mcp:latest
-   ```
-2. **Mount Token File:** Run the server locally once to generate `~/.config/domoticz-mcp/token.json`, then mount that file into the Docker container:
-   ```bash
-   docker run -d \
-     --name domoticz-mcp \
-     -p 8000:8000 \
-     -e DOMOTICZ_URL="http://192.168.1.100:8080" \
-     -v ~/.config/domoticz-mcp:/app/.config/domoticz-mcp \
-     -e HOME="/app" \
-     ghcr.io/YOUR_GITHUB_USERNAME/domoticz-mcp:latest
-   ```
+In a Docker container, you have two options:
+1. **Password Grant (Easiest):** Provide username and password *in addition to* the Client ID and Secret. The server will automatically perform a headless login to fetch the initial token.
+2. **Mount Token File:** Run the server locally once to generate the token file, then mount it into the container.
 
-Alternatively, you can provide a valid token directly via the `DOMOTICZ_OAUTH_TOKEN` environment variable.
-
-*Note: If you use a token, you can safely disable "Allow Basic-Auth authentication over plain HTTP" in the Domoticz security settings.*
 #### Option 2: Basic Auth
-If you prefer traditional username and password authentication without an OAuth application:
+If you prefer traditional username and password authentication:
+
+| Option | Environment Variable | Description |
+|--------|----------------------|-------------|
+| `--domoticz-username` | `DOMOTICZ_USERNAME` | Your Domoticz username |
+| `--domoticz-password` | `DOMOTICZ_PASSWORD` | Your Domoticz password |
 
 1. In the Domoticz UI, go to **Setup** -> **Settings** -> **Security**.
 2. Ensure "Allow Basic-Auth authentication over plain HTTP" is enabled (if you are not using HTTPS).
-3. Configure the following environment variables:
-   - `DOMOTICZ_USERNAME`: Your Domoticz username.
-   - `DOMOTICZ_PASSWORD`: Your Domoticz password.
 
 ## MCP Client Configuration
 

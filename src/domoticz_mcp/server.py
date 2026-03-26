@@ -24,21 +24,16 @@ from typing import Optional
 
 mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), stateless_http=True)
 
-DOMOTICZ_BASE_URL = os.environ.get("DOMOTICZ_URL", "https://xmpp.vanadrighem.eu/domoticz").strip('\'"')
-if not DOMOTICZ_BASE_URL.startswith(('http://', 'https://')):
-    DOMOTICZ_BASE_URL = 'http://' + DOMOTICZ_BASE_URL
-if DOMOTICZ_BASE_URL.endswith('/json.htm'):
-    DOMOTICZ_BASE_URL = DOMOTICZ_BASE_URL[:-9]
-    
+# Configuration defaults
+DOMOTICZ_BASE_URL = "https://xmpp.vanadrighem.eu/domoticz"
 DOMOTICZ_API_URL = f"{DOMOTICZ_BASE_URL}/json.htm"
-DOMOTICZ_USERNAME = (os.environ.get("DOMOTICZ_USERNAME") or "").strip('\'"') or None
-DOMOTICZ_PASSWORD = (os.environ.get("DOMOTICZ_PASSWORD") or "").strip('\'"') or None
-DOMOTICZ_CLIENT_ID = (os.environ.get("DOMOTICZ_CLIENT_ID") or os.environ.get("DOMOTICZ_CLIENTID") or "").strip('\'"') or None
-DOMOTICZ_CLIENT_SECRET = (os.environ.get("DOMOTICZ_CLIENT_SECRET") or os.environ.get("DOMOTICZ_CLIENTSECRET") or "").strip('\'"') or None
-DOMOTICZ_OAUTH_TOKEN = (os.environ.get("DOMOTICZ_OAUTH_TOKEN") or "").strip('\'"') or None
-
+DOMOTICZ_USERNAME = None
+DOMOTICZ_PASSWORD = None
+DOMOTICZ_CLIENT_ID = None
+DOMOTICZ_CLIENT_SECRET = None
+DOMOTICZ_OAUTH_TOKEN = None
 TOKEN_FILE = os.path.expanduser("~/.config/domoticz-mcp/token.json")
-_oauth_token_cache: Optional[str] = DOMOTICZ_OAUTH_TOKEN
+_oauth_token_cache: Optional[str] = None
 
 def _do_interactive_oauth_flow():
     code = None
@@ -866,18 +861,110 @@ def analyze_automations() -> str:
 import argparse
 
 def main():
+    global DOMOTICZ_BASE_URL, DOMOTICZ_API_URL, DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD
+    global DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET, DOMOTICZ_OAUTH_TOKEN, TOKEN_FILE, _oauth_token_cache
+
     parser = argparse.ArgumentParser(description="Domoticz MCP Server")
-    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http"], help="Transport to use")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to for SSE / HTTP")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind to for SSE / HTTP")
+    parser.add_argument("--transport", choices=["stdio", "sse", "streamable-http"], help="Transport to use")
+    parser.add_argument("--host", help="Host to bind to for SSE / HTTP")
+    parser.add_argument("--port", type=int, help="Port to bind to for SSE / HTTP")
+    
+    parser.add_argument("--domoticz-url", help="Domoticz base URL")
+    parser.add_argument("--domoticz-username", help="Domoticz username")
+    parser.add_argument("--domoticz-password", help="Domoticz password")
+    parser.add_argument("--domoticz-client-id", help="Domoticz OAuth client ID")
+    parser.add_argument("--domoticz-client-secret", help="Domoticz OAuth client secret")
+    parser.add_argument("--domoticz-oauth-token", help="Domoticz OAuth token")
+    parser.add_argument("--token-file", help="Path to OAuth token storage file")
+
     args = parser.parse_args()
     
-    if args.transport == "sse":
+    # Configuration structure: key -> {value, source, env_vars}
+    # env_vars is a list of environment variables to check, in order.
+    # The first one that exists will be used and will override command line.
+    config_spec = {
+        "transport": {"default": "stdio", "env_vars": ["DOMOTICZ_MCP_TRANSPORT", "TRANSPORT"]},
+        "host": {"default": "127.0.0.1", "env_vars": ["DOMOTICZ_MCP_HOST", "HOST"]},
+        "port": {"default": 8000, "type": int, "env_vars": ["DOMOTICZ_MCP_PORT", "PORT"]},
+        "domoticz_url": {"default": "https://xmpp.vanadrighem.eu/domoticz", "env_vars": ["DOMOTICZ_URL"]},
+        "domoticz_username": {"default": None, "env_vars": ["DOMOTICZ_USERNAME"]},
+        "domoticz_password": {"default": None, "env_vars": ["DOMOTICZ_PASSWORD"]},
+        "domoticz_client_id": {"default": None, "env_vars": ["DOMOTICZ_CLIENT_ID", "DOMOTICZ_CLIENTID"]},
+        "domoticz_client_secret": {"default": None, "env_vars": ["DOMOTICZ_CLIENT_SECRET", "DOMOTICZ_CLIENTSECRET"]},
+        "domoticz_oauth_token": {"default": None, "env_vars": ["DOMOTICZ_OAUTH_TOKEN"]},
+        "token_file": {"default": os.path.expanduser("~/.config/domoticz-mcp/token.json"), "env_vars": ["DOMOTICZ_MCP_TOKEN_FILE", "TOKEN_FILE"]}
+    }
+    
+    final_config = {}
+    
+    for key, spec in config_spec.items():
+        val = spec["default"]
+        source = "default"
+        
+        # 1. Command Line
+        arg_val = getattr(args, key.replace("_", "-"), getattr(args, key, None))
+        if arg_val is not None:
+            val = arg_val
+            source = "command line"
+            
+        # 2. Environment Variables (override CLI)
+        for env_var in spec.get("env_vars", []):
+            env_val = os.environ.get(env_var)
+            if env_val:
+                env_val = env_val.strip('\'"')
+                if spec.get("type") == int:
+                    try:
+                        val = int(env_val)
+                    except ValueError:
+                        continue
+                else:
+                    val = env_val
+                source = f"env variable ({env_var})"
+                break
+        
+        final_config[key] = {"value": val, "source": source}
+
+    # Normalize Domoticz URL
+    url = final_config["domoticz_url"]["value"]
+    if not url.startswith(('http://', 'https://')):
+        url = 'http://' + url
+    if url.endswith('/json.htm'):
+        url = url[:-9]
+    final_config["domoticz_url"]["value"] = url
+    
+    # Set globals
+    DOMOTICZ_BASE_URL = final_config["domoticz_url"]["value"]
+    DOMOTICZ_API_URL = f"{DOMOTICZ_BASE_URL}/json.htm"
+    DOMOTICZ_USERNAME = final_config["domoticz_username"]["value"]
+    DOMOTICZ_PASSWORD = final_config["domoticz_password"]["value"]
+    DOMOTICZ_CLIENT_ID = final_config["domoticz_client_id"]["value"]
+    DOMOTICZ_CLIENT_SECRET = final_config["domoticz_client_secret"]["value"]
+    DOMOTICZ_OAUTH_TOKEN = final_config["domoticz_oauth_token"]["value"]
+    TOKEN_FILE = final_config["token_file"]["value"]
+    _oauth_token_cache = DOMOTICZ_OAUTH_TOKEN
+
+    transport = final_config["transport"]["value"]
+    host = final_config["host"]["value"]
+    port = final_config["port"]["value"]
+
+    sys.stderr.write("Settings:\n")
+    for key, data in final_config.items():
+        val_display = data['value']
+        # Mask sensitive data
+        is_sensitive = "password" in key or "secret" in key or "token" in key
+        is_path = "file" in key or "path" in key
+        if is_sensitive and not is_path:
+            if data['value']:
+                val_display = "********"
+        sys.stderr.write(f"  {key}: {val_display} (from {data['source']})\n")
+    sys.stderr.flush()
+    
+    if transport == "sse":
         import uvicorn
         from starlette.middleware.cors import CORSMiddleware
         
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
+        mcp.settings.host = host
+        mcp.settings.port = port
         
         app = mcp.sse_app()
         app.add_middleware(
@@ -888,13 +975,13 @@ def main():
             allow_headers=["*"],
         )
         
-        uvicorn.run(app, host=args.host, port=args.port)
-    elif args.transport == "streamable-http":
+        uvicorn.run(app, host=host, port=port)
+    elif transport == "streamable-http":
         import uvicorn
         from starlette.middleware.cors import CORSMiddleware
         
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
+        mcp.settings.host = host
+        mcp.settings.port = port
         
         app = mcp.streamable_http_app()
         app.add_middleware(
@@ -905,7 +992,7 @@ def main():
             allow_headers=["*"],
         )
         
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(app, host=host, port=port)
     else:
         mcp.run()
 
