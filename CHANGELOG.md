@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/adrighem/domoticz-mcp/compare/v0.1.4...v0.2.0) (2026-03-26)
+
+
+### Features
+
+* add environment variable support for all settings ([#8](https://github.com/adrighem/domoticz-mcp/issues/8)) ([e06dafe](https://github.com/adrighem/domoticz-mcp/commit/e06dafe1b0998584cf74b7fc444b4e12daf55fd4))
+
 ## [0.1.4](https://github.com/adrighem/domoticz-mcp/compare/v0.1.3...v0.1.4) (2026-03-24)
 
 
