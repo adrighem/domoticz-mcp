@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "domoticz-mcp"
-version = "0.2.0"
+version = "1.0.0"
 description = "A Model Context Protocol (MCP) server for Domoticz home automation"
 readme = "README.md"
 requires-python = ">=3.10"

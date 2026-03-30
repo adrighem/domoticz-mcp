@@ -5,17 +5,19 @@
 
 ### Features
 
-* release version 1.0.0 with performance optimizations and diagnostic tools ([aa44988](https://github.com/adrighem/domoticz-mcp/commit/aa4498827db2636b251ae81d341c2f9ada2e8b9a))
+* **Performance:** Implement TTL caching (5 minutes) for devices, scenes, user variables, and rooms to significantly reduce API latency.
+* **Connection Pooling:** Refactor client to use a persistent `httpx.AsyncClient` for improved efficiency in long-running modes.
+* **Discovery Tool:** Add `search_devices` tool for substring/regex searching across names and current states.
+* **Maintenance Tools:** Add `get_battery_levels` and `get_connectivity_report` tools to proactively identify sensors needing attention.
+* **Energy Analytics:** Add `analyze_energy_usage` tool to summarize daily consumption across all power meters.
+* **Curated Context:** Add `domoticz://dashboard` resource for a high-signal view of favorite and active devices.
+* **Guided AI Workflows:** Add `audit_batteries`, `find_devices_by_state`, `energy_audit`, and `maintenance_report` prompts.
+* **AI Guidance:** Enrich docstrings with clear type-code mappings for virtual sensors and user variables.
+* **Configuration:** Add environment variable support for all settings ([#8](https://github.com/adrighem/domoticz-mcp/issues/8)) ([e06dafe](https://github.com/adrighem/domoticz-mcp/commit/e06dafe1b0998584cf74b7fc444b4e12daf55fd4))
 
+### Testing
 
-### Bug Fixes
-
-* Correct types ([203ced4](https://github.com/adrighem/domoticz-mcp/commit/203ced48374a84c37ea1f1f2dfd9216d3a459c6f))
-
-
-### Miscellaneous Chores
-
-* release 1.0.0 ([42d5fb5](https://github.com/adrighem/domoticz-mcp/commit/42d5fb5161ad4d91a9ccad4856540b5742a207fc))
+* Increase test coverage from 32% to 50% with comprehensive unit tests for core tools, resources, and resolution logic.
 
 ## [0.2.0](https://github.com/adrighem/domoticz-mcp/compare/v0.1.4...v0.2.0) (2026-03-26)
 
