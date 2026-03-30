@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.0](https://github.com/adrighem/domoticz-mcp/compare/v0.2.0...v1.0.0) (2026-03-30)
+
+
+### Features
+
+* release version 1.0.0 with performance optimizations and diagnostic tools ([aa44988](https://github.com/adrighem/domoticz-mcp/commit/aa4498827db2636b251ae81d341c2f9ada2e8b9a))
+
+
+### Bug Fixes
+
+* Correct types ([203ced4](https://github.com/adrighem/domoticz-mcp/commit/203ced48374a84c37ea1f1f2dfd9216d3a459c6f))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([42d5fb5](https://github.com/adrighem/domoticz-mcp/commit/42d5fb5161ad4d91a9ccad4856540b5742a207fc))
+
 ## [0.2.0](https://github.com/adrighem/domoticz-mcp/compare/v0.1.4...v0.2.0) (2026-03-26)
 
 
