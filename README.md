@@ -15,6 +15,9 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 The server exposes **Tools** (for active control and modifications), **Resources** (for read-only contextual awareness), and **Prompts** (for guided interaction templates).
 
 ### Tools (Actions)
+- **Search and Discovery:** Use `search_devices` to find devices by name or current status using substring or regex matching.
+- **Maintenance:** Proactively identify sensors needing attention with `get_battery_levels` (low battery alerts) and `get_connectivity_report` (devices that haven't checked in).
+- **Energy Analytics:** Use `analyze_energy_usage` to summarize daily consumption across all power reporting devices and meters.
 - **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, control blinds, and manage RGB/color lighting (brightness, hue, color temperature). Supports lookup by `idx` or `name`.
 - **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values. Supports lookup by `idx` or `name`.
 - **Rooms and Scenes:** Control scenes/groups. Get room devices by `idx` or `room_name`.
@@ -27,6 +30,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans.
 
 ### Resources (Context)
+- **`domoticz://dashboard`**: Read a curated view of favorite and currently active devices (lights on, sensors active).
 - **`domoticz://devices`**: Read the current state of all Domoticz devices.
 - **`domoticz://device/{idx}`**, **`domoticz://device/{type}/{subtype}/{idx}`**, or **`domoticz://device/name/{name}`**: Read the current state of a specific device.
 - **`domoticz://rooms`**: Read configured rooms (Room Plans).
@@ -41,9 +45,18 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **`domoticz://settings`**: Read global Domoticz settings and configuration.
 
 ### Prompts (Templates)
-- **`summarize_home`**: A prompt that instructs the AI to read the home state (devices, temperature, open doors) and provide a human-readable summary.
+- **`summarize_home`**: Instructs the AI to provide a human-readable summary of the home's current state using the dashboard resource.
+- **`maintenance_report`**: A comprehensive health check that audits batteries, checks device connectivity, and reviews system logs for errors.
+- **`audit_batteries`**: Specifically audits battery levels across all sensors to find those below a certain threshold.
+- **`energy_audit`**: Analyzes energy usage across the home to identify the biggest consumers today.
+- **`find_devices_by_state`**: Helps find all devices in a particular state (e.g., "show me everything that is open").
 - **`troubleshoot_device`**: A template that asks for a device `idx` or `name` and instructs the AI to read the device state and system logs to diagnose issues.
 - **`analyze_automations`**: Instructs the AI to review your internal event scripts for logic flaws or optimizations.
+
+## Performance and Efficiency
+
+- **Caching:** The server implements a 5-minute TTL cache for devices, scenes, user variables, and rooms to significantly reduce API latency and Domoticz load.
+- **Connection Pooling:** Uses a persistent `httpx.AsyncClient` for improved efficiency during long-running sessions.
 
 ## Prerequisites
 
