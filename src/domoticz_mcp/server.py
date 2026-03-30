@@ -704,12 +704,12 @@ async def create_virtual_sensor(hw_idx: int, sensorname: str, sensortype: int) -
     10: Lux
     11: Voltage
     12: Current
-    13: Usage (Energy)
+    13: Distance
     14: Text
     15: Alert
-    16: Distance
     17: Percentage
     19: Counter
+    113: kWh (Energy)
     """
     async with create_client() as client:
         response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=createvirtualsensor&idx={hw_idx}&sensorname={urllib.parse.quote(sensorname)}&sensortype={sensortype}")
