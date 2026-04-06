@@ -253,6 +253,15 @@ async def _resolve_user_variable_idx(client, idx: int = None, name: str = None) 
             return int(var.get("idx"))
     return None
 
+def _simplify_device(dev: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce device dictionary to essential fields to save context space."""
+    keys_to_keep = [
+        "idx", "Name", "Type", "SubType", "Data", "Status", 
+        "BatteryLevel", "Favorite", "HardwareName", "LastUpdate", 
+        "TypeImg", "Usage", "CounterToday", "Temp", "Humidity"
+    ]
+    return {k: dev[k] for k in keys_to_keep if k in dev}
+
 @mcp.tool()
 async def get_all_devices() -> str:
     """Get all devices and their current states from Domoticz."""
@@ -405,7 +414,10 @@ async def get_room_devices(idx: int = None, room_name: str = None) -> str:
         # Using plan=idx returns the full status of all devices in the room, rather than just their IDs
         response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&plan={idx}")
         response.raise_for_status()
-        return response.text
+        data = response.json()
+        if "result" in data:
+            data["result"] = [_simplify_device(d) for d in data["result"]]
+        return json.dumps(data)
 
 @mcp.tool()
 async def get_user_variables() -> str:
@@ -859,15 +871,7 @@ async def get_dashboard_resource() -> str:
             is_active = status not in ["off", "closed", "normal", ""] or "on" in data or "open" in data
             
             if is_favorite or is_active:
-                curated.append({
-                    "idx": dev.get("idx"),
-                    "Name": dev.get("Name"),
-                    "Data": dev.get("Data"),
-                    "Status": dev.get("Status"),
-                    "Favorite": is_favorite,
-                    "Type": dev.get("Type"),
-                    "LastUpdate": dev.get("LastUpdate")
-                })
+                curated.append(_simplify_device(dev))
         
         return json.dumps({"status": "OK", "result": curated})
 
@@ -892,7 +896,8 @@ async def get_all_devices_resource() -> str:
     """Read the current state of all Domoticz devices."""
     async with create_client() as client:
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true&order=Name")
-        return json.dumps({"status": "OK", "result": devices})
+        simplified = [_simplify_device(d) for d in devices]
+        return json.dumps({"status": "OK", "result": simplified})
 
 @mcp.resource("domoticz://device/{idx}")
 async def get_device_resource(idx: int) -> str:
@@ -983,7 +988,10 @@ async def get_scene_resource(idx: int) -> str:
     async with create_client() as client:
         response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenedevices&idx={idx}&isscene=true")
         response.raise_for_status()
-        return response.text
+        data = response.json()
+        if "result" in data:
+            data["result"] = [_simplify_device(d) for d in data["result"]]
+        return json.dumps(data)
 
 @mcp.resource("domoticz://scene/name/{name}")
 async def get_scene_by_name_resource(name: str) -> str:
