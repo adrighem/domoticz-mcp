@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.0](https://github.com/adrighem/domoticz-mcp/compare/v1.0.0...v1.1.0) (2026-04-15)
+
+
+### Features
+
+* enhance agent-awareness with overview, health tools, and guidance ([ba07a5a](https://github.com/adrighem/domoticz-mcp/commit/ba07a5a33e02ef53d3736bcd48c3a64105a063ef))
+
+
+### Bug Fixes
+
+* resolve merge conflicts and integrate configuration improvements ([6cbf91f](https://github.com/adrighem/domoticz-mcp/commit/6cbf91f1dc6433924b42a8525068761e28decfdb))
+* robust 401 handling and automatic token refresh ([0e5da58](https://github.com/adrighem/domoticz-mcp/commit/0e5da58399c621bbb920c9b920c46910cb906f53))
+
+
+### Performance Improvements
+
+* simplify device payloads for all device lookups ([7b42fc4](https://github.com/adrighem/domoticz-mcp/commit/7b42fc45a195ccb296a8aae07b0fb32635ccb09b))
+
+
+### Documentation
+
+* update README with 1.0.0 functional changes ([60bab77](https://github.com/adrighem/domoticz-mcp/commit/60bab775ff7f4dfcfd49cc97da5fd6077b214f95))
+
 ## [1.0.0](https://github.com/adrighem/domoticz-mcp/compare/v1.0.0...v1.0.0) (2026-03-30)
 
 
