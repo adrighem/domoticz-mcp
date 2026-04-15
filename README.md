@@ -15,10 +15,10 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 The server exposes **Tools** (for active control and modifications), **Resources** (for read-only contextual awareness), and **Prompts** (for guided interaction templates).
 
 ### Tools (Actions)
-- **Search and Discovery:** Use `search_devices` to find devices by name or current status using substring or regex matching.
-- **Maintenance:** Proactively identify sensors needing attention with `get_battery_levels` (low battery alerts) and `get_connectivity_report` (devices that haven't checked in).
+- **Search and Discovery:** Use `get_overview` for a high-level system summary and device counts. Use `search_devices` to find devices by name or current status using substring or regex matching.
+- **Maintenance:** Proactively identify sensors needing attention with `get_battery_levels` (low battery alerts) and `get_connectivity_report` (devices that haven't checked in). Use `get_system_health` for an overview of hardware gateway status.
 - **Energy Analytics:** Use `analyze_energy_usage` to summarize daily consumption across all power reporting devices and meters.
-- **Device Control:** Toggle switches, set states (On/Off), set dimmer levels, set thermostat temperatures, control blinds, and manage RGB/color lighting (brightness, hue, color temperature). Supports lookup by `idx` or `name`.
+- **Device Control:** Toggle switches, set states (On/Off), set dimmer levels (0-100), set thermostat temperatures (Celsius), control blinds, and manage RGB/color lighting (brightness, hue, color temperature). Supports lookup by `idx` or `name`.
 - **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values. Supports lookup by `idx` or `name`.
 - **Rooms and Scenes:** Control scenes/groups. Get room devices by `idx` or `room_name`.
 - **User Variables:** Read, add, update, and delete Domoticz user variables. Supports lookup by `idx` or `name`.
@@ -26,7 +26,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **System Information:** Get Domoticz instance version, global settings, hardware, sun times, users, and internal event scripts/rules.
 - **Security:** Get and set the Domoticz security panel status.
 - **Notifications:** Send notifications through the Domoticz notification subsystem.
-- **Event Management:** Get, create, and update internal event scripts (Blockly, Lua, dzVents, Python).
+- **Event Management:** Get, create, update, and **search inside** internal event scripts (`search_scripts`). Supports Blockly, Lua, dzVents, and Python.
 - **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans.
 
 ### Resources (Context)
@@ -41,10 +41,12 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **`domoticz://user-variable/{idx}`** or **`domoticz://user-variable/name/{name}`**: Read a specific Domoticz user variable.
 - **`domoticz://events` & `domoticz://event/{event_id}`**: Read the overview and specific source code of event scripts.
 - **`domoticz://log`**: Read the current Domoticz system log.
+- **`domoticz://logs/error`**: Read a filtered view containing only 'Error' level entries from the log.
 - **`domoticz://security`**: Read the current status of the security panel.
 - **`domoticz://settings`**: Read global Domoticz settings and configuration.
 
 ### Prompts (Templates)
+- **`agent_guidance`**: Provides the AI agent with critical knowledge about Domoticz-specific logic and best practices.
 - **`summarize_home`**: Instructs the AI to provide a human-readable summary of the home's current state using the dashboard resource.
 - **`maintenance_report`**: A comprehensive health check that audits batteries, checks device connectivity, and reviews system logs for errors.
 - **`audit_batteries`**: Specifically audits battery levels across all sensors to find those below a certain threshold.

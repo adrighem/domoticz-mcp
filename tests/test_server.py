@@ -4,6 +4,7 @@ import httpx
 from httpx import Response
 import json
 import urllib.parse
+from datetime import datetime, timedelta
 from domoticz_mcp.server import (
     get_device, toggle_switch, get_room_devices, get_all_devices,
     _resolve_device_idx, _resolve_scene_idx, _resolve_user_variable_idx,
@@ -463,3 +464,105 @@ def test_dns_rebinding_protection_enabled_rejects():
         response = client.post("/mcp", headers={"Host": "192.168.100.100", "Content-Type": "application/json"})
         # Should be rejected with 421
         assert response.status_code == 421
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_overview():
+    from domoticz_mcp.server import get_overview
+    
+    # Mock version
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getversion").mock(
+        return_value=Response(200, json={"version": "2024.1", "build_time": "2024-01-01"})
+    )
+    # Mock devices
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json=DEVICES_MOCK_RESPONSE)
+    )
+    # Mock scenes
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenes").mock(
+        return_value=Response(200, json={"result": []})
+    )
+    # Mock variables
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getuservariables").mock(
+        return_value=Response(200, json={"result": []})
+    )
+    # Mock plans
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true").mock(
+        return_value=Response(200, json=PLANS_MOCK_RESPONSE)
+    )
+    # Mock hardware
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=gethardware").mock(
+        return_value=Response(200, json={"result": [{"idx": "1"}]})
+    )
+    
+    response = await get_overview()
+    data = json.loads(response)
+    assert data["result"]["system"]["version"] == "2024.1"
+    assert data["result"]["counts"]["devices"] == 3
+    assert data["result"]["counts"]["rooms_plans"] == 2
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_system_health():
+    from domoticz_mcp.server import get_system_health
+    
+    # Mock hardware
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=gethardware").mock(
+        return_value=Response(200, json={"result": [{"Name": "Z-Wave", "Type": "Z-Wave USB", "Enabled": "true"}]})
+    )
+    
+    # Mock devices (one unresponsive)
+    old_time = (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")
+    mock_data = {
+        "result": [
+            {"idx": "1", "Name": "Dead Sensor", "LastUpdate": old_time}
+        ]
+    }
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json=mock_data)
+    )
+    
+    response = await get_system_health()
+    data = json.loads(response)
+    assert data["result"]["hardware_health"][0]["Status"] == "Online"
+    assert data["result"]["unresponsive_devices_count"] == 1
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_scripts():
+    from domoticz_mcp.server import search_scripts
+    
+    # Mock script list
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list").mock(
+        return_value=Response(200, json={"result": [{"idx": "10", "name": "AutoLight", "interpreter": "python"}]})
+    )
+    
+    # Mock script content
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event=10").mock(
+        return_value=Response(200, json={"result": [{"source": "if light_level < 50: turn_on()"}]})
+    )
+    
+    response = await search_scripts(query="light_level")
+    data = json.loads(response)
+    assert len(data["result"]) == 1
+    assert data["result"][0]["Name"] == "AutoLight"
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_error_logs_resource():
+    from domoticz_mcp.server import get_error_logs_resource
+    
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime=0&loglevel=4").mock(
+        return_value=Response(200, json={"result": [{"level": 4, "message": "Critical Error"}]})
+    )
+    
+    response = await get_error_logs_resource()
+    assert "Critical Error" in response
+
+def test_agent_guidance():
+    from domoticz_mcp.server import agent_guidance
+    prompt = agent_guidance()
+    assert "GUIDELINES" in prompt
+    assert "get_overview" in prompt
+    assert "BatteryLevel" in prompt
+

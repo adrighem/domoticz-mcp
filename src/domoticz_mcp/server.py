@@ -268,6 +268,148 @@ def _simplify_device(dev: Dict[str, Any]) -> Dict[str, Any]:
     return {k: dev[k] for k in keys_to_keep if k in dev}
 
 @mcp.tool()
+async def get_overview(detail_level: str = "minimal") -> str:
+    """Get a high-level overview of the Domoticz system.
+    
+    Args:
+        detail_level: 'minimal' (default) for counts and summary, 'standard' for including a sample of devices.
+    """
+    async with create_client() as client:
+        # Get system info
+        resp = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getversion")
+        sys_info = resp.json()
+        
+        # Get counts from various caches
+        devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
+        scenes = await _get_cached_data(client, _scene_cache, f"{DOMOTICZ_API_URL}?type=command&param=getscenes")
+        vars = await _get_cached_data(client, _user_variable_cache, f"{DOMOTICZ_API_URL}?type=command&param=getuservariables")
+        plans = await _get_cached_data(client, _plans_cache, f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true")
+        
+        # Hardware count
+        hw_resp = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
+        hardware = hw_resp.json().get("result", [])
+        
+        overview = {
+            "system": {
+                "version": sys_info.get("version"),
+                "build_time": sys_info.get("build_time"),
+                "domoticz_url": DOMOTICZ_BASE_URL
+            },
+            "counts": {
+                "devices": len(devices),
+                "scenes_and_groups": len(scenes),
+                "user_variables": len(vars),
+                "rooms_plans": len(plans),
+                "hardware_gateways": len(hardware)
+            }
+        }
+        
+        if detail_level != "minimal":
+            # Add a sample of favorite/active devices
+            favorites = [d for d in devices if d.get("Favorite") == 1][:10]
+            overview["favorite_devices"] = [_simplify_device(d) for d in favorites]
+            
+        return json.dumps({"status": "OK", "result": overview})
+
+@mcp.tool()
+async def get_system_health() -> str:
+    """Check the health of the Domoticz system and hardware gateways."""
+    async with create_client() as client:
+        hw_resp = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
+        hardware = hw_resp.json().get("result", [])
+        
+        health_report = []
+        for hw in hardware:
+            status = "Online" if hw.get("Enabled") == "true" else "Disabled"
+            health_report.append({
+                "Name": hw.get("Name"),
+                "Type": hw.get("Type"),
+                "Status": status,
+                "Address": hw.get("Address"),
+                "Port": hw.get("Port")
+            })
+            
+        # Check for unresponsive devices (last update > 24h)
+        devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
+        now = datetime.now()
+        unresponsive_count = 0
+        for dev in devices:
+            last_update_str = dev.get("LastUpdate")
+            if last_update_str:
+                try:
+                    last_update = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S")
+                    if now - last_update > timedelta(hours=24):
+                        unresponsive_count += 1
+                except ValueError:
+                    continue
+                    
+        return json.dumps({
+            "status": "OK", 
+            "result": {
+                "hardware_health": health_report,
+                "unresponsive_devices_count": unresponsive_count,
+                "recommendation": "Use `get_connectivity_report` for a detailed list of unresponsive devices." if unresponsive_count > 0 else "System looks healthy."
+            }
+        })
+
+@mcp.tool()
+async def search_scripts(query: str) -> str:
+    """Search for a specific string inside event scripts (Lua, dzVents, Python, etc.)."""
+    async with create_client() as client:
+        # 1. Get the list of scripts
+        list_resp = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list")
+        scripts = list_resp.json().get("result", [])
+        
+        matches = []
+        query_lower = query.lower()
+        
+        # 2. For each script, load its source and search
+        for script in scripts:
+            script_id = script.get("idx")
+            load_resp = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event={script_id}")
+            script_data = load_resp.json().get("result", [{}])[0]
+            
+            source_code = script_data.get("xml", "") or script_data.get("source", "")
+            if query_lower in source_code.lower():
+                matches.append({
+                    "idx": script_id,
+                    "Name": script.get("name"),
+                    "Interpreter": script.get("interpreter"),
+                    "Type": script.get("eventtype"),
+                    "Status": "Enabled" if script.get("eventstatus") == "1" else "Disabled"
+                })
+                
+        return json.dumps({"status": "OK", "result": matches, "count": len(scripts)})
+
+@mcp.resource("domoticz://logs/error")
+async def get_error_logs_resource() -> str:
+    """Read only the 'Error' level entries from the Domoticz system log."""
+    async with create_client() as client:
+        # loglevel 4 is ERR
+        response = await client.get(f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime=0&loglevel=4")
+        response.raise_for_status()
+        return response.text
+
+@mcp.prompt()
+def agent_guidance() -> str:
+    """Provides the AI agent with critical knowledge about Domoticz-specific logic and best practices."""
+    return """
+    You are an expert assistant controlling a Domoticz Home Automation system. 
+    To be effective, follow these GUIDELINES:
+    
+    1. ORIENTATION: Start a new session with `get_overview` to understand the home's scale and available hardware.
+    2. RESOLVING NAMES: Domoticz tools prefer `idx` (index). If you only have a name, use `search_devices` first to find the correct `idx`.
+    3. BATTERY LEVELS: A `BatteryLevel` of 255 is a special value meaning the device is mains-powered or doesn't report battery. Ignore these when auditing health.
+    4. RANGES: 
+       - Dimmers and Dimmer levels: Always 0 to 100. (0=Off, 100=Full).
+       - Color Temperature (Kelvin): 0 to 100 (Where 0 is warmest/coldest depending on hardware, usually 0=Warm, 100=Cold).
+    5. TROUBLESHOOTING: 
+       - If a device is "Timed Out" or "Unresponsive", use `get_system_health` and check `domoticz://logs/error`.
+       - To find which automation controls a device, use `search_scripts` with the device's name or idx.
+    6. USER VARIABLES: Use `get_user_variables` to read state that isn't attached to a physical device.
+    """
+
+@mcp.tool()
 async def get_all_devices() -> str:
     """Get all devices and their current states from Domoticz."""
     async with create_client() as client:
@@ -301,7 +443,7 @@ async def get_device(idx: int = None, name: str = None) -> str:
 
 @mcp.tool()
 async def toggle_switch(idx: int = None, name: str = None) -> str:
-    """Toggle a switch or light by IDX or Name in Domoticz."""
+    """Toggle a switch or light by IDX or Name. Prefer using IDX for precision."""
     if idx is None and name is None:
         return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
@@ -314,7 +456,13 @@ async def toggle_switch(idx: int = None, name: str = None) -> str:
 
 @mcp.tool()
 async def set_switch_state(state: str, idx: int = None, name: str = None) -> str:
-    """Set a switch or light to On or Off by IDX or Name in Domoticz. state must be 'On' or 'Off'."""
+    """Set a switch or light to On or Off. 
+    
+    Args:
+        state: Must be 'On' or 'Off'.
+        idx: Device index.
+        name: Device name (case-insensitive).
+    """
     if idx is None and name is None:
         return '{"status": "error", "message": "Must provide either idx or name"}'
     if state.lower() not in ['on', 'off']:
@@ -329,7 +477,13 @@ async def set_switch_state(state: str, idx: int = None, name: str = None) -> str
 
 @mcp.tool()
 async def set_dimmer_level(level: int, idx: int = None, name: str = None) -> str:
-    """Set the brightness level of a dimmer switch (0-100) by IDX or Name in Domoticz."""
+    """Set the brightness level of a dimmer switch.
+    
+    Args:
+        level: Integer from 0 to 100. Note: 0 is Off, 100 is Full Brightness.
+        idx: Device index.
+        name: Device name.
+    """
     if idx is None and name is None:
         return '{"status": "error", "message": "Must provide either idx or name"}'
     if not (0 <= level <= 100):
@@ -344,7 +498,13 @@ async def set_dimmer_level(level: int, idx: int = None, name: str = None) -> str
 
 @mcp.tool()
 async def set_temperature_setpoint(setpoint: float, idx: int = None, name: str = None) -> str:
-    """Set the temperature setpoint for a thermostat by IDX or Name in Domoticz."""
+    """Set the temperature setpoint for a thermostat.
+    
+    Args:
+        setpoint: Target temperature in Celsius (e.g., 21.5).
+        idx: Device index.
+        name: Device name.
+    """
     if idx is None and name is None:
         return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
@@ -357,7 +517,13 @@ async def set_temperature_setpoint(setpoint: float, idx: int = None, name: str =
 
 @mcp.tool()
 async def control_blinds(command: str, idx: int = None, name: str = None) -> str:
-    """Control blinds by IDX or Name in Domoticz. command must be 'Open', 'Close', or 'Stop'."""
+    """Control blinds or covers.
+    
+    Args:
+        command: Must be 'Open', 'Close', or 'Stop'.
+        idx: Device index.
+        name: Device name.
+    """
     if idx is None and name is None:
         return '{"status": "error", "message": "Must provide either idx or name"}'
     if command.capitalize() not in ['Open', 'Close', 'Stop']:
@@ -651,7 +817,15 @@ async def get_users() -> str:
 
 @mcp.tool()
 async def set_color_brightness(hue: int, brightness: int, idx: int = None, name: str = None, iswhite: bool = False) -> str:
-    """Set color and brightness for an RGB/color light by IDX or Name in Domoticz."""
+    """Set color and brightness for an RGB light.
+    
+    Args:
+        hue: Color hue (0-360).
+        brightness: Brightness level (0-100).
+        idx: Device index.
+        name: Device name.
+        iswhite: Set to True for white mode (on supported hardware).
+    """
     if idx is None and name is None:
         return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
@@ -664,7 +838,13 @@ async def set_color_brightness(hue: int, brightness: int, idx: int = None, name:
 
 @mcp.tool()
 async def set_color_temperature(kelvin: int, idx: int = None, name: str = None) -> str:
-    """Set color temperature (Kelvin) for a light by IDX or Name in Domoticz. kelvin: 0..100."""
+    """Set color temperature for a light.
+    
+    Args:
+        kelvin: Color temperature level (0-100). Note: 0 is warmest, 100 is coldest (standard Domoticz range).
+        idx: Device index.
+        name: Device name.
+    """
     if idx is None and name is None:
         return '{"status": "error", "message": "Must provide either idx or name"}'
     async with create_client() as client:
