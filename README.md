@@ -123,7 +123,7 @@ The server supports three different transports for clients to connect with:
 
 ## Configuration
 
-The server can be configured via environment variables or command-line arguments. **Environment variables take precedence over command-line arguments**, which in turn override the defaults. This is designed to facilitate easy configuration in Docker environments.
+The server can be configured via environment variables, a `.env` file, or command-line arguments. **Environment variables take precedence over command-line arguments**, which in turn override the defaults. Using a `.env` file is a convenient way to provide these variables without exposing them in your shell history.
 
 ### General Options
 
@@ -134,6 +134,21 @@ The server can be configured via environment variables or command-line arguments
 | `--port` | `DOMOTICZ_MCP_PORT`, `PORT` | `8000` | Port to bind to for SSE / HTTP |
 | `--domoticz-url` | `DOMOTICZ_URL` | `https://xmpp.vanadrighem.eu/domoticz` | Base URL of your Domoticz instance |
 | `--token-file` | `DOMOTICZ_MCP_TOKEN_FILE`, `TOKEN_FILE` | `~/.config/domoticz-mcp/token.json` | Path to OAuth token storage file |
+
+**Example `.env` file:**
+```env
+DOMOTICZ_URL=http://192.168.1.100:8080
+DOMOTICZ_CLIENT_ID=your_client_id_here
+DOMOTICZ_CLIENT_SECRET=your_client_secret_here
+```
+
+### Transport Options
+
+By default, the server uses standard input/output (`stdio`) for communication with the MCP client. You can also run it as an HTTP Server-Sent Events (SSE) streaming server using the `--transport sse` argument.
+
+```bash
+domoticz-mcp --transport sse --host 127.0.0.1 --port 8000
+```
 
 ### Authentication Options
 

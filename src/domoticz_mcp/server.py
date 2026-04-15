@@ -3,11 +3,13 @@
 # dependencies = [
 #     "mcp",
 #     "httpx",
+#     "python-dotenv",
 # ]
 # ///
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from dotenv import load_dotenv
 import httpx
 import os
 import sys
@@ -23,6 +25,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
+
+# Load environment variables from a .env file if it exists
+load_dotenv()
 
 mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), stateless_http=True)
 

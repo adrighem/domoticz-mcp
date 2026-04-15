@@ -16,7 +16,8 @@ dependencies = [
     "mcp",
     "httpx",
     "uvicorn",
-    "starlette"
+    "starlette",
+    "python-dotenv",
 ]
 
 [project.urls]
