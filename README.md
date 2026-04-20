@@ -58,7 +58,13 @@ The server exposes **Tools** (for active control and modifications), **Resources
 ## Performance and Efficiency
 
 - **Caching:** The server implements a 5-minute TTL cache for devices, scenes, user variables, and rooms to significantly reduce API latency and Domoticz load.
-- **Connection Pooling:** Uses a persistent `httpx.AsyncClient` for improved efficiency during long-running sessions.
+- **Connection Pooling:** Uses a persistent `httpx.AsyncClient` with proper lifecycle management for improved efficiency during long-running sessions. The server exposes `close_global_client()` for clean shutdown.
+
+## Architecture
+
+- **Type Safety:** Full type annotations using Python 3.10+ union syntax for improved IDE support and code clarity.
+- **Error Handling:** Structured exception hierarchy (`DomoticzError`, `DeviceNotFoundError`, `AuthenticationError`, etc.) for precise error handling and debugging.
+- **Shared Resolution:** Unified `_resolve_idx()` helper function for consistent device/scene/variable lookup patterns.
 
 ## Prerequisites
 
@@ -269,14 +275,18 @@ For other clients that support the Model Context Protocol, simply configure them
 To develop and run tests for this project:
 
 1. Clone the repository.
-2. Create a virtual environment and install development dependencies using `uv`:
+2. Install development dependencies using `uv`:
    ```bash
-   uv venv
    uv pip install -e ".[dev]"
    ```
 3. Run the test suite:
    ```bash
-   uv run pytest
+   uv run pytest tests/
+   ```
+
+   Or use `uv run` directly without installation:
+   ```bash
+   uv run --directory /path/to/domoticz-mcp pytest
    ```
 
 ## License

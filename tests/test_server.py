@@ -1,15 +1,16 @@
 import pytest
 import respx
-import httpx
 from httpx import Response
 import json
-import urllib.parse
 from datetime import datetime, timedelta
 from domoticz_mcp.server import (
     get_device, toggle_switch, get_room_devices, get_all_devices,
     _resolve_device_idx, _resolve_scene_idx, _resolve_user_variable_idx,
     create_client, DOMOTICZ_API_URL,
-    _device_cache, _scene_cache, _user_variable_cache, _plans_cache
+    _device_cache, _scene_cache, _user_variable_cache, _plans_cache,
+    DomoticzError,
+    DeviceNotFoundError, SceneNotFoundError, UserVariableNotFoundError,
+    AuthenticationError, InvalidParameterError
 )
 
 def setup_function():
@@ -402,7 +403,7 @@ async def test_resource_handlers():
 @pytest.mark.asyncio
 @respx.mock
 async def test_error_cases():
-    from domoticz_mcp.server import get_device, toggle_switch
+    from domoticz_mcp.server import get_device
     
     # Device not found
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
@@ -565,4 +566,95 @@ def test_agent_guidance():
     assert "GUIDELINES" in prompt
     assert "get_overview" in prompt
     assert "BatteryLevel" in prompt
+
+
+def test_error_types():
+    """Test the custom exception types."""
+    err = DomoticzError("Test error", 500)
+    assert err.message == "Test error"
+    assert err.status_code == 500
+
+    dev_err = DeviceNotFoundError("Kitchen Light")
+    assert dev_err.identifier == "Kitchen Light"
+    assert dev_err.status_code == 404
+    assert "Kitchen Light" in dev_err.message
+
+    scene_err = SceneNotFoundError("Movie Mode")
+    assert scene_err.identifier == "Movie Mode"
+    assert scene_err.status_code == 404
+
+    var_err = UserVariableNotFoundError("MyVar")
+    assert var_err.identifier == "MyVar"
+    assert var_err.status_code == 404
+
+    auth_err = AuthenticationError()
+    assert auth_err.status_code == 401
+
+    auth_err_custom = AuthenticationError("Token expired")
+    assert "Token expired" in auth_err_custom.message
+
+    param_err = InvalidParameterError("Invalid value")
+    assert param_err.status_code == 400
+    assert "Invalid value" in param_err.message
+
+
+def test_client_lifecycle():
+    """Test that DomoticzClient properly manages HTTP client lifecycle."""
+    # Test own client mode
+    client = create_client(own_client=True)
+    assert client._owns_client is True
+    assert client._own_client is True
+
+    # Test shared client mode (when global client doesn't exist yet)
+    client_shared = create_client(own_client=False)
+    # When global client doesn't exist, it creates its own
+    assert client_shared._owns_client is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_resolve_idx_shared():
+    """Test that the shared _resolve_idx function works."""
+    from domoticz_mcp.server import _resolve_idx
+
+    mock_devices = {"result": [{"idx": "42", "Name": "Test Device"}]}
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json=mock_devices)
+    )
+
+    async with create_client() as client:
+        # Test idx passthrough
+        idx = await _resolve_idx(client, idx=42, name=None, cache=_device_cache, api_url=f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
+        assert idx == 42
+
+        # Test name lookup
+        idx = await _resolve_idx(client, idx=None, name="Test Device", cache=_device_cache, api_url=f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
+        assert idx == 42
+
+        # Test case insensitivity
+        idx = await _resolve_idx(client, idx=None, name="test device", cache=_device_cache, api_url=f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
+        assert idx == 42
+
+
+def test_error_response_helper():
+    """Test the error response helper function."""
+    from domoticz_mcp.server import _error_response
+
+    resp = _error_response("Test error")
+    data = json.loads(resp)
+    assert data["status"] == "error"
+    assert data["message"] == "Test error"
+
+    resp_custom = _error_response("Custom status", status="warning")
+    data_custom = json.loads(resp_custom)
+    assert data_custom["status"] == "warning"
+
+
+def test_format_response_helper():
+    """Test the format response helper function."""
+    from domoticz_mcp.server import _format_response
+
+    test_data = {"status": "OK", "result": {"count": 1}}
+    resp = _format_response(test_data)
+    assert json.loads(resp) == test_data
 
