@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.2.0](https://github.com/adrighem/domoticz-mcp/compare/v1.1.0...v1.2.0) (2026-05-09)
+
+
+### Features
+
+* add pagination, new tools, resources, and prompts ([5b44ce2](https://github.com/adrighem/domoticz-mcp/commit/5b44ce2192b80656a5393008cdae01850889cc28))
+
+
+### Bug Fixes
+
+* prevent infinite OAuth2 login loop on token expiration ([4d4cb9b](https://github.com/adrighem/domoticz-mcp/commit/4d4cb9b746f22209ce248758c55d8cf4b009b4c3))
+* resolve f-string syntax error for Python 3.10 compatibility ([e53768b](https://github.com/adrighem/domoticz-mcp/commit/e53768bab940793151edc7215d4a377916ed0473))
+
+
+### Documentation
+
+* clarify CI verification rule in GEMINI.md ([9f6e072](https://github.com/adrighem/domoticz-mcp/commit/9f6e072bdee56b93c8be0d2a57fbb1523008fadc))
+* update README with new tools, resources, and prompts ([c229dda](https://github.com/adrighem/domoticz-mcp/commit/c229ddacb1f071a06113e86f6cd3915dbf6b72bd))
+
 ## [1.1.0](https://github.com/adrighem/domoticz-mcp/compare/v1.0.0...v1.1.0) (2026-04-15)
 
 
