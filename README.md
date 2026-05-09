@@ -16,7 +16,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ### Tools (Actions)
 - **Search and Discovery:** Use `get_overview` for a high-level system summary and device counts. Use `search_devices` to find devices by name or current status using substring or regex matching.
-- **Maintenance:** Proactively identify sensors needing attention with `get_battery_levels` (low battery alerts) and `get_connectivity_report` (devices that haven't checked in). Use `get_system_health` for an overview of hardware gateway status.
+- **Maintenance:** Proactively identify sensors needing attention with `get_battery_levels` (low battery alerts) and `get_connectivity_report` (devices that haven't checked in). Use `get_system_health` for an overview of hardware gateway status. Check for system updates with `check_for_updates` and execute a system restart with `restart_system`.
 - **Energy Analytics:** Use `analyze_energy_usage` to summarize daily consumption across all power reporting devices and meters.
 - **Device Control:** Toggle switches, set states (On/Off), set dimmer levels (0-100), set thermostat temperatures (Celsius), control blinds, and manage RGB/color lighting (brightness, hue, color temperature). Supports lookup by `idx` or `name`.
 - **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values. Supports lookup by `idx` or `name`.
@@ -27,7 +27,8 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **Security:** Get and set the Domoticz security panel status.
 - **Notifications:** Send notifications through the Domoticz notification subsystem.
 - **Event Management:** Get, create, update, and **search inside** internal event scripts (`search_scripts`). Supports Blockly, Lua, dzVents, and Python.
-- **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans.
+- **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans. Get a base64 encoded snapshot using `get_camera_snapshot`.
+- **Advanced:** Use `call_domoticz_api` to execute any generic Domoticz API endpoint directly.
 
 ### Resources (Context)
 - **`domoticz://dashboard`**: Read a curated view of favorite and currently active devices (lights on, sensors active).
@@ -44,6 +45,9 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **`domoticz://logs/error`**: Read a filtered view containing only 'Error' level entries from the log.
 - **`domoticz://security`**: Read the current status of the security panel.
 - **`domoticz://settings`**: Read global Domoticz settings and configuration.
+- **`domoticz://hardware`**: Read the configured hardware gateways.
+- **`domoticz://docs/dzvents_syntax`**: Cheat sheet for writing dzVents automation scripts.
+- **`domoticz://docs/blockly_syntax`**: Syntax rules for Blockly XML automations.
 
 ### Prompts (Templates)
 - **`agent_guidance`**: Provides the AI agent with critical knowledge about Domoticz-specific logic and best practices.
@@ -54,6 +58,10 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **`find_devices_by_state`**: Helps find all devices in a particular state (e.g., "show me everything that is open").
 - **`troubleshoot_device`**: A template that asks for a device `idx` or `name` and instructs the AI to read the device state and system logs to diagnose issues.
 - **`analyze_automations`**: Instructs the AI to review your internal event scripts for logic flaws or optimizations.
+- **`write_dzvents_script`**: Helps the AI write a dzVents script by providing syntax rules and device lookup instructions.
+- **`write_blockly_script`**: Helps the AI construct Blockly automations using proper XML representation.
+- **`system_update_check`**: Guides the AI to check for system updates and verify hardware gateway health.
+- **`dashboard_organization`**: Prompts the AI to analyze favorite devices and suggest room-based groupings.
 
 ## Performance and Efficiency
 
