@@ -1432,7 +1432,7 @@ def maintenance_report() -> str:
 def troubleshoot_device(idx: int | None = None, name: str | None = None) -> str:
     """Prompt to help troubleshoot a specific Domoticz device by IDX or Name."""
     target = f"IDX {idx}" if idx is not None else f"name '{name}'"
-    resource = f"domoticz://device/{idx}" if idx is not None else f"domoticz://device/name/{urllib.parse.quote(name or "")}"
+    resource = f"domoticz://device/{idx}" if idx is not None else f"domoticz://device/name/{urllib.parse.quote(name or '')}"
     return f"Please help me troubleshoot my Domoticz device with {target}. Start by reading the device's state using the `{resource}` resource, and check the system log using the `domoticz://log` resource for any recent errors related to this device. Analyze the state and logs to tell me what might be wrong."
 
 @mcp.prompt()
