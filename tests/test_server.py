@@ -118,6 +118,7 @@ async def test_get_all_devices():
     data = json.loads(response)
     assert data["status"] == "OK"
     assert data["result"] == DEVICES_MOCK_RESPONSE["result"]
+    assert data["total_count"] == 3
 
 @pytest.mark.asyncio
 @respx.mock
@@ -133,11 +134,13 @@ async def test_search_devices():
     data = json.loads(response)
     assert len(data["result"]) == 1
     assert data["result"][0]["Name"] == "Kitchen Light"
+    assert data["total_count"] == 1
     
     # Search by name (case insensitive)
     response = await search_devices(query="light")
     data = json.loads(response)
     assert len(data["result"]) == 2
+    assert data["total_count"] == 2
 
 @pytest.mark.asyncio
 @respx.mock
@@ -351,13 +354,17 @@ async def test_scene_and_room_tools():
     await get_hardware()
 
 def test_prompts():
-    from domoticz_mcp.server import audit_batteries, find_devices_by_state, maintenance_report, energy_audit
+    from domoticz_mcp.server import audit_batteries, find_devices_by_state, maintenance_report, energy_audit, write_dzvents_script, write_blockly_script, system_update_check, dashboard_organization
     
     assert "battery levels" in audit_batteries(15)
     assert "15%" in audit_batteries(15)
     assert "currently in the 'on' state" in find_devices_by_state("on")
     assert "health report" in maintenance_report()
     assert "energy audit" in energy_audit()
+    assert "dzVents automation" in write_dzvents_script()
+    assert "Blockly automation" in write_blockly_script()
+    assert "pending updates" in system_update_check()
+    assert "Room Plans" in dashboard_organization()
 
 @pytest.mark.asyncio
 @respx.mock
@@ -658,3 +665,69 @@ def test_format_response_helper():
     resp = _format_response(test_data)
     assert json.loads(resp) == test_data
 
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_events():
+    from domoticz_mcp.server import get_events
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list").mock(
+        return_value=Response(200, json={"result": [{"name": "test"}]})
+    )
+    response = await get_events()
+    data = json.loads(response)
+    assert data["status"] == "OK"
+    assert data["total_count"] == 1
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_new_tools():
+    from domoticz_mcp.server import call_domoticz_api, check_for_updates, restart_system, get_camera_snapshot
+    from domoticz_mcp.server import DOMOTICZ_BASE_URL
+    import base64
+    
+    # call_domoticz_api
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=testparam&myarg=1").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    response = await call_domoticz_api("testparam", {"myarg": "1"})
+    assert json.loads(response)["status"] == "OK"
+    
+    # check_for_updates
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=checkforupdate").mock(
+        return_value=Response(200, json={"status": "OK", "HaveUpdate": False})
+    )
+    response = await check_for_updates()
+    assert json.loads(response)["HaveUpdate"] is False
+    
+    # restart_system
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=system_reboot").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    response_fail = await restart_system(confirm=False)
+    assert "error" in json.loads(response_fail)["status"]
+    
+    response_ok = await restart_system(confirm=True)
+    assert json.loads(response_ok)["status"] == "OK"
+    
+    # get_camera_snapshot
+    respx.get(f"{DOMOTICZ_BASE_URL}/camsnapshot.jpg?idx=1").mock(
+        return_value=Response(200, content=b"fakeimage")
+    )
+    response = await get_camera_snapshot(1)
+    data = json.loads(response)
+    assert data["status"] == "OK"
+    assert data["result"] == base64.b64encode(b"fakeimage").decode("utf-8")
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_new_resources():
+    from domoticz_mcp.server import get_dzvents_docs, get_blockly_docs, get_hardware_resource
+    
+    assert "dzVents Syntax" in await get_dzvents_docs()
+    assert "Blockly" in await get_blockly_docs()
+    
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=gethardware").mock(
+        return_value=Response(200, json={"result": [{"Name": "MyHardware"}]})
+    )
+    response = await get_hardware_resource()
+    assert "MyHardware" in json.loads(response)["result"][0]["Name"]

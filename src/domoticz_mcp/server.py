@@ -393,6 +393,10 @@ def _simplify_device(dev: Dict[str, Any]) -> Dict[str, Any]:
     ]
     return {k: dev[k] for k in keys_to_keep if k in dev}
 
+def _paginate(data: list, offset: int, limit: int) -> list:
+    """Paginate a list of results."""
+    return data[offset:offset + limit]
+
 @mcp.tool()
 async def get_overview(detail_level: str = "minimal") -> str:
     """Get a high-level overview of the Domoticz system.
@@ -535,14 +539,15 @@ def agent_guidance() -> str:
     """
 
 @mcp.tool()
-async def get_all_devices() -> str:
+async def get_all_devices(offset: int = 0, limit: int = 50) -> str:
     """Get all devices and their current states from Domoticz."""
     async with create_client() as client:
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true&order=Name")
-        return json.dumps({"status": "OK", "result": devices})
+        paginated = _paginate(devices, offset, limit)
+        return json.dumps({"status": "OK", "result": paginated, "total_count": len(devices), "offset": offset, "limit": limit})
 
 @mcp.tool()
-async def search_devices(query: str) -> str:
+async def search_devices(query: str, offset: int = 0, limit: int = 50) -> str:
     """Search for devices by name or data (status). Returns a list of matching devices."""
     async with create_client() as client:
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
@@ -551,7 +556,8 @@ async def search_devices(query: str) -> str:
         for dev in devices:
             if query_lower in dev.get("Name", "").lower() or query_lower in dev.get("Data", "").lower():
                 results.append(dev)
-        return json.dumps({"status": "OK", "result": results})
+        paginated = _paginate(results, offset, limit)
+        return json.dumps({"status": "OK", "result": paginated, "total_count": len(results), "offset": offset, "limit": limit})
 
 @mcp.tool()
 async def get_device(idx: int | None = None, name: str | None = None) -> str:
@@ -813,11 +819,13 @@ async def get_system_status() -> str:
         return response.text
 
 @mcp.tool()
-async def get_events() -> str:
+async def get_events(offset: int = 0, limit: int = 50) -> str:
     """Get overview of the internal event system scripts and rules."""
     async with create_client() as client:
-        events = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list")
-        return json.dumps({"status": "OK", "result": events})
+        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list")
+        events = response.json().get("result", [])
+        paginated = _paginate(events, offset, limit)
+        return json.dumps({"status": "OK", "result": paginated, "total_count": len(events), "offset": offset, "limit": limit})
 
 @mcp.tool()
 async def get_event(event_id: int) -> str:
@@ -875,6 +883,46 @@ async def update_event(event_id: int, name: str, interpreter: str, event_type: s
         }
         response = await _do_request(client, "POST", f"{DOMOTICZ_API_URL}?type=command&param=events", data=data)
         return response.text
+
+@mcp.tool()
+async def call_domoticz_api(param: str, kwargs: dict) -> str:
+    """Call a generic Domoticz API endpoint.
+    
+    Args:
+        param: The 'param' parameter of the JSON API (e.g. 'checkforupdate').
+        kwargs: Dictionary of additional query parameters.
+    """
+    async with create_client() as client:
+        url_params = urllib.parse.urlencode(kwargs)
+        url = f"{DOMOTICZ_API_URL}?type=command&param={param}"
+        if url_params:
+            url += f"&{url_params}"
+        response = await _do_request(client, "GET", url)
+        return response.text
+
+@mcp.tool()
+async def check_for_updates() -> str:
+    """Check if the Domoticz system has any pending updates."""
+    async with create_client() as client:
+        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=checkforupdate")
+        return response.text
+
+@mcp.tool()
+async def restart_system(confirm: bool = False) -> str:
+    """Restart the Domoticz system. Requires confirm=True."""
+    if not confirm:
+        return '{"status": "error", "message": "You must set confirm=True to restart the system"}'
+    async with create_client() as client:
+        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=system_reboot")
+        return response.text
+
+@mcp.tool()
+async def get_camera_snapshot(idx: int) -> str:
+    """Get a camera snapshot as a base64 encoded string."""
+    async with create_client() as client:
+        response = await _do_request(client, "GET", f"{DOMOTICZ_BASE_URL}/camsnapshot.jpg?idx={idx}")
+        img_b64 = base64.b64encode(response.content).decode("utf-8")
+        return json.dumps({"status": "OK", "result": img_b64})
 
 @mcp.tool()
 async def get_hardware() -> str:
@@ -1025,11 +1073,18 @@ async def update_device_value(idx: int | None = None, name: str | None = None, n
         return response.text
 
 @mcp.tool()
-async def get_log(lastlogtime: int = 0, loglevel: int = 268435455) -> str:
+async def get_log(lastlogtime: int = 0, loglevel: int = 268435455, offset: int = 0, limit: int = 50) -> str:
     """Retrieve the main system log. lastlogtime is seconds since epoch, loglevel is bitmask."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime={lastlogtime}&loglevel={loglevel}")
-        return response.text
+        data = response.json()
+        if "result" in data:
+            total_count = len(data["result"])
+            data["result"] = _paginate(data["result"], offset, limit)
+            data["total_count"] = total_count
+            data["offset"] = offset
+            data["limit"] = limit
+        return json.dumps(data)
 
 @mcp.tool()
 async def add_log_message(message: str, level: int = 2) -> str:
@@ -1131,6 +1186,54 @@ async def analyze_energy_usage() -> str:
                 })
         
         return json.dumps({"status": "OK", "result": results})
+
+@mcp.resource("domoticz://docs/dzvents_syntax")
+async def get_dzvents_docs() -> str:
+    """Read the dzVents syntax cheat sheet."""
+    return """
+dzVents Syntax Cheat Sheet:
+return {
+    on = {
+        devices = { 'My Switch' }
+    },
+    execute = function(domoticz, device)
+        if device.state == 'On' then
+            domoticz.devices('Other Switch').switchOn()
+            domoticz.log('Switched on the other switch', domoticz.LOG_INFO)
+        end
+    end
+}
+Key Commands:
+- switchOn(), switchOff(), toggleSwitch()
+- dimTo(percentage)
+- setHex(r, g, b)
+- setKelvin(temperature)
+"""
+
+@mcp.resource("domoticz://docs/blockly_syntax")
+async def get_blockly_docs() -> str:
+    """Read the Blockly syntax rules for Domoticz."""
+    return """
+Blockly in Domoticz uses an XML representation.
+Example:
+<xml xmlns="http://www.w3.org/1999/xhtml">
+  <block type="controls_if">
+    <value name="IF0">
+      <block type="logic_compare">
+        <field name="OP">EQ</field>
+        ...
+      </block>
+    </value>
+  </block>
+</xml>
+"""
+
+@mcp.resource("domoticz://hardware")
+async def get_hardware_resource() -> str:
+    """Read the configured hardware gateways."""
+    async with create_client() as client:
+        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
+        return response.text
 
 @mcp.resource("domoticz://dashboard")
 async def get_dashboard_resource() -> str:
@@ -1289,6 +1392,26 @@ async def get_event_resource(event_id: int) -> str:
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event={event_id}")
         return response.text
+
+@mcp.prompt()
+def write_dzvents_script() -> str:
+    """Prompt to help write a dzVents automation script."""
+    return "Help me write a dzVents automation. First, read the `domoticz://docs/dzvents_syntax` resource for rules. Then, use `search_devices` to find the exact IDXs needed. Finally, output the script and offer to deploy it using `create_event`."
+
+@mcp.prompt()
+def write_blockly_script() -> str:
+    """Prompt to help create a Blockly automation."""
+    return "Help me create a Blockly automation. First, read the `domoticz://docs/blockly_syntax` resource for rules. Then, use `search_devices` to find the exact IDXs needed. Finally, output the XML and offer to deploy it using `create_event`."
+
+@mcp.prompt()
+def system_update_check() -> str:
+    """Prompt to check for pending updates and system health."""
+    return "Check if my Domoticz instance has any pending updates using `check_for_updates`, and verify the health of my hardware gateways using `get_system_health`."
+
+@mcp.prompt()
+def dashboard_organization() -> str:
+    """Prompt to suggest better dashboard organization."""
+    return "Analyze my 'Favorite' devices and my Room Plans. Suggest a better way to group my devices into rooms for easier navigation."
 
 @mcp.prompt()
 def audit_batteries(threshold: int = 20) -> str:
