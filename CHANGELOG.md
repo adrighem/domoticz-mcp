@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/adrighem/domoticz-mcp/compare/v1.2.0...v1.2.1) (2026-06-11)
+
+
+### Bug Fixes
+
+* harden OAuth token handling ([2a329cb](https://github.com/adrighem/domoticz-mcp/commit/2a329cbf6e70f30b048864ccd36569fc878a77e1))
+
 ## [1.2.0](https://github.com/adrighem/domoticz-mcp/compare/v1.1.0...v1.2.0) (2026-05-09)
 
 
