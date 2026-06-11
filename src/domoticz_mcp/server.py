@@ -101,11 +101,11 @@ def _error_response(message: str, status: str = "error") -> str:
 def _do_interactive_oauth_flow():
     code = None
     state_received = None
-    
+
     class CallbackHandler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             pass # Suppress logging to stderr
-            
+
         def do_GET(self):
             nonlocal code, state_received
             parsed_path = urllib.parse.urlparse(self.path)
@@ -126,14 +126,14 @@ def _do_interactive_oauth_flow():
 
     server = HTTPServer(('127.0.0.1', 0), CallbackHandler)
     port = server.server_port
-    
+
     state = secrets.token_urlsafe(16)
     code_verifier = secrets.token_urlsafe(32)
     code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode('ascii')).digest()).decode('ascii').rstrip('=')
-    
+
     redirect_uri = f"http://127.0.0.1:{port}/callback"
     auth_url = f"{DOMOTICZ_BASE_URL}/oauth2/v1/authorize?response_type=code&client_id={DOMOTICZ_CLIENT_ID}&redirect_uri={urllib.parse.quote(redirect_uri)}&state={state}&code_challenge={code_challenge}&code_challenge_method=S256"
-    
+
     sys.stderr.write("\n==========================================================\n")
     sys.stderr.write("Authentication required for Domoticz MCP Server.\n")
     sys.stderr.write("Please open this URL in your browser to authenticate:\n\n")
@@ -141,151 +141,162 @@ def _do_interactive_oauth_flow():
     sys.stderr.write(f"Waiting for authentication on {redirect_uri}...\n")
     sys.stderr.write("==========================================================\n\n")
     sys.stderr.flush()
-    
+
     try:
         webbrowser.open(auth_url)
     except Exception:
         pass
-        
+
     server.serve_forever()
-    
+
     if code and state_received == state:
         return code, code_verifier, redirect_uri
     return None, None, None
 
-async def _fetch_oauth_token(force_refresh: bool = False) -> Optional[str]:
+_token_refresh_lock = asyncio.Lock()
+
+async def _fetch_oauth_token(force_refresh: bool = False, old_token: Optional[str] = None) -> Optional[str]:
     global _oauth_token_cache
-    
+
     if not force_refresh and _oauth_token_cache:
         return _oauth_token_cache
-        
-    # Try loading from file
-    existing_token_data = None
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, 'r') as f:
-                existing_token_data = json.load(f)
-                if not force_refresh and existing_token_data and "access_token" in existing_token_data:
-                    _oauth_token_cache = existing_token_data["access_token"]
-                    return _oauth_token_cache
-        except Exception as e:
-            sys.stderr.write(f"Failed to load token file: {e}\n")
 
-    if not DOMOTICZ_CLIENT_ID:
-        return None
-
-    try:
-        async with httpx.AsyncClient() as client:
-            discovery_url = f"{DOMOTICZ_BASE_URL}/.well-known/openid-configuration"
-            resp = await client.get(discovery_url)
-            resp.raise_for_status()
-            config = resp.json()
-            
-            token_endpoint = config.get("token_endpoint")
-            if token_endpoint:
-                if "127.0.0.1" in token_endpoint or "localhost" in token_endpoint:
-                    parsed = urllib.parse.urlparse(token_endpoint)
-                    token_endpoint = f"{DOMOTICZ_BASE_URL}{parsed.path}"
-            else:
-                return None
-
-            auth = (DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET) if DOMOTICZ_CLIENT_SECRET else None
-            token_resp = None
-
-            # Try refresh token first
-            if force_refresh and existing_token_data and "refresh_token" in existing_token_data:
-                data = {
-                    "grant_type": "refresh_token",
-                    "refresh_token": existing_token_data["refresh_token"],
-                    "client_id": DOMOTICZ_CLIENT_ID
-                }
-                
-                try:
-                    refresh_resp = await client.post(
-                        token_endpoint,
-                        auth=auth,
-                        data=data
-                    )
-                    if refresh_resp.status_code == 200:
-                        token_resp = refresh_resp
-                    else:
-                        sys.stderr.write(f"Failed to refresh token (Status: {refresh_resp.status_code}), re-authenticating...\n")
-                except Exception as e:
-                    sys.stderr.write(f"Exception during token refresh: {e}\n")
-            
-            # If no token_resp yet, perform initial flow
-            if token_resp is None:
-                if DOMOTICZ_USERNAME and DOMOTICZ_PASSWORD:
-                    data = {
-                        "grant_type": "password",
-                        "client_id": DOMOTICZ_CLIENT_ID,
-                        "client_secret": DOMOTICZ_CLIENT_SECRET
-                    }
-                    token_resp = await client.post(
-                        token_endpoint, 
-                        auth=(DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD),
-                        data=data
-                    )
-                else:
-                    code, code_verifier, redirect_uri = await asyncio.to_thread(_do_interactive_oauth_flow)
-                    if not code:
-                        return None
-                        
-                    data = {
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "redirect_uri": redirect_uri,
-                        "client_id": DOMOTICZ_CLIENT_ID,
-                        "code_verifier": code_verifier
-                    }
-                    
-                    token_resp = await client.post(
-                        token_endpoint,
-                        auth=auth,
-                        data=data
-                    )
-
-            token_resp.raise_for_status()
-            token_data = token_resp.json()
-            
-            # Persist the old refresh token if the new response doesn't provide one
-            if "refresh_token" not in token_data and existing_token_data and "refresh_token" in existing_token_data:
-                token_data["refresh_token"] = existing_token_data["refresh_token"]
-
-            _oauth_token_cache = token_data.get("access_token")
-            
-            # Save token to file
-            os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-            with open(TOKEN_FILE, 'w') as f:
-                json.dump(token_data, f)
-                
+    async with _token_refresh_lock:
+        # Check if another task already refreshed the token while we were waiting
+        if force_refresh and old_token is not None and _oauth_token_cache != old_token:
             return _oauth_token_cache
-    except Exception as e:
-        import logging
-        logging.error(f"Failed to fetch OAuth token: {e}")
-        return None
+
+        if not force_refresh and _oauth_token_cache:
+            return _oauth_token_cache
+
+        # Try loading from file
+        existing_token_data = None
+        if os.path.exists(TOKEN_FILE):
+            try:
+                with open(TOKEN_FILE, 'r') as f:
+                    existing_token_data = json.load(f)
+                    if not force_refresh and existing_token_data and "access_token" in existing_token_data:
+                        _oauth_token_cache = existing_token_data["access_token"]
+                        return _oauth_token_cache
+            except Exception as e:
+                sys.stderr.write(f"Failed to load token file: {e}\n")
+
+        if not DOMOTICZ_CLIENT_ID:
+            return None
+
+        try:
+            async with httpx.AsyncClient() as client:
+                discovery_url = f"{DOMOTICZ_BASE_URL}/.well-known/openid-configuration"
+                resp = await client.get(discovery_url)
+                resp.raise_for_status()
+                config = resp.json()
+
+                token_endpoint = config.get("token_endpoint")
+                if token_endpoint:
+                    if "127.0.0.1" in token_endpoint or "localhost" in token_endpoint:
+                        parsed = urllib.parse.urlparse(token_endpoint)
+                        token_endpoint = f"{DOMOTICZ_BASE_URL}{parsed.path}"
+                else:
+                    return None
+
+                auth = (DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET) if DOMOTICZ_CLIENT_SECRET else None
+                token_resp = None
+
+                # Try refresh token first
+                if force_refresh and existing_token_data and "refresh_token" in existing_token_data:
+                    data = {
+                        "grant_type": "refresh_token",
+                        "refresh_token": existing_token_data["refresh_token"],
+                        "client_id": DOMOTICZ_CLIENT_ID
+                    }
+                    if DOMOTICZ_CLIENT_SECRET:
+                        data["client_secret"] = DOMOTICZ_CLIENT_SECRET
+
+                    try:
+                        refresh_resp = await client.post(
+                            token_endpoint,
+                            auth=auth,
+                            data=data
+                        )
+                        if refresh_resp.status_code == 200:
+                            token_resp = refresh_resp
+                        else:
+                            sys.stderr.write(f"Failed to refresh token (Status: {refresh_resp.status_code}), re-authenticating...\n")
+                    except Exception as e:
+                        sys.stderr.write(f"Exception during token refresh: {e}\n")
+
+                # If no token_resp yet, perform initial flow
+                if token_resp is None:
+                    if DOMOTICZ_USERNAME and DOMOTICZ_PASSWORD:
+                        data = {
+                            "grant_type": "password",
+                            "client_id": DOMOTICZ_CLIENT_ID,
+                            "client_secret": DOMOTICZ_CLIENT_SECRET
+                        }
+                        token_resp = await client.post(
+                            token_endpoint,
+                            auth=(DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD),
+                            data=data
+                        )
+                    else:
+                        code, code_verifier, redirect_uri = await asyncio.to_thread(_do_interactive_oauth_flow)
+                        if not code:
+                            return None
+
+                        data = {
+                            "grant_type": "authorization_code",
+                            "code": code,
+                            "redirect_uri": redirect_uri,
+                            "client_id": DOMOTICZ_CLIENT_ID,
+                            "code_verifier": code_verifier
+                        }
+
+                        token_resp = await client.post(
+                            token_endpoint,
+                            auth=auth,
+                            data=data
+                        )
+
+                token_resp.raise_for_status()
+                token_data = token_resp.json()
+
+                # Persist the old refresh token if the new response doesn't provide one
+                if "refresh_token" not in token_data and existing_token_data and "refresh_token" in existing_token_data:
+                    token_data["refresh_token"] = existing_token_data["refresh_token"]
+
+                _oauth_token_cache = token_data.get("access_token")
+
+                # Save token to file
+                os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+                with open(TOKEN_FILE, 'w') as f:
+                    json.dump(token_data, f)
+
+                return _oauth_token_cache
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to fetch OAuth token: {e}")
+            return None
 
 async def _do_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
     """Perform a request with a single retry on 401 Unauthorized to handle expired tokens."""
     global _oauth_token_cache
-    
+
+    used_token = _oauth_token_cache
+
     try:
         resp = await client.request(method, url, **kwargs)
         if resp.status_code == 401:
-            # Token might be expired. Clear cache and retry once.
-            _oauth_token_cache = None
-            
-            # Re-fetch token (this will trigger OAuth flow if needed)
-            new_token = await _fetch_oauth_token(force_refresh=True)
+            # Token might be expired. Re-fetch token (this will trigger OAuth flow if needed)
+            new_token = await _fetch_oauth_token(force_refresh=True, old_token=used_token)
             if new_token:
                 # Update headers for the retry
                 if "headers" not in kwargs:
                     kwargs["headers"] = {}
                 kwargs["headers"]["Authorization"] = f"Bearer {new_token}"
-                
+
                 # Retry the request
                 resp = await client.request(method, url, **kwargs)
-        
+
         resp.raise_for_status()
         return resp
     except httpx.HTTPStatusError as e:
@@ -305,14 +316,16 @@ class DomoticzClient:
             self._owns_client = False
 
     async def __aenter__(self) -> "httpx.AsyncClient":
-        oauth_token = None
+        oauth_token = DOMOTICZ_OAUTH_TOKEN or _oauth_token_cache
 
-        if DOMOTICZ_CLIENT_ID:
+        if DOMOTICZ_CLIENT_ID and not oauth_token:
             oauth_token = await _fetch_oauth_token()
 
         if oauth_token:
             self.client.headers["Authorization"] = f"Bearer {oauth_token}"
+            self.client.auth = None
         elif DOMOTICZ_USERNAME and DOMOTICZ_PASSWORD:
+            self.client.headers.pop("Authorization", None)
             self.client.auth = (DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD)
         else:
             self.client.headers.pop("Authorization", None)
@@ -381,8 +394,8 @@ async def _resolve_user_variable_idx(client: "httpx.AsyncClient", idx: Optional[
 def _simplify_device(dev: Dict[str, Any]) -> Dict[str, Any]:
     """Reduce device dictionary to essential fields."""
     keys_to_keep = [
-        "idx", "Name", "Type", "SubType", "Data", "Status", 
-        "BatteryLevel", "Favorite", "HardwareName", "LastUpdate", 
+        "idx", "Name", "Type", "SubType", "Data", "Status",
+        "BatteryLevel", "Favorite", "HardwareName", "LastUpdate",
         "TypeImg", "Usage", "CounterToday", "Temp", "Humidity"
     ]
     return {k: dev[k] for k in keys_to_keep if k in dev}
@@ -906,7 +919,7 @@ def main():
     parser.add_argument("--transport", choices=["stdio", "sse", "streamable-http"], help="Transport to use")
     parser.add_argument("--host", help="Host to bind to for SSE / HTTP")
     parser.add_argument("--port", type=int, help="Port to bind to for SSE / HTTP")
-    
+
     parser.add_argument("--domoticz-url", help="Domoticz base URL")
     parser.add_argument("--domoticz-username", help="Domoticz username")
     parser.add_argument("--domoticz-password", help="Domoticz password")
@@ -916,7 +929,7 @@ def main():
     parser.add_argument("--token-file", help="Path to OAuth token storage file")
 
     args = parser.parse_args()
-    
+
     config_spec = {
         "transport": {"default": "stdio", "env_vars": ["DOMOTICZ_MCP_TRANSPORT", "TRANSPORT"]},
         "host": {"default": "127.0.0.1", "env_vars": ["DOMOTICZ_MCP_HOST", "HOST"]},
@@ -929,7 +942,7 @@ def main():
         "domoticz_oauth_token": {"default": None, "env_vars": ["DOMOTICZ_OAUTH_TOKEN"]},
         "token_file": {"default": os.path.expanduser("~/.config/domoticz-mcp/token.json"), "env_vars": ["DOMOTICZ_MCP_TOKEN_FILE", "TOKEN_FILE"]}
     }
-    
+
     final_config = {}
     for key, spec in config_spec.items():
         val, source = spec["default"], "default"
@@ -951,7 +964,7 @@ def main():
     if not url.startswith(('http://', 'https://')): url = 'http://' + url
     if url.endswith('/json.htm'): url = url[:-9]
     final_config["domoticz_url"]["value"] = url
-    
+
     DOMOTICZ_BASE_URL = final_config["domoticz_url"]["value"]
     DOMOTICZ_API_URL = f"{DOMOTICZ_BASE_URL}/json.htm"
     DOMOTICZ_USERNAME = final_config["domoticz_username"]["value"]

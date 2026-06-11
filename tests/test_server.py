@@ -2,7 +2,9 @@ import pytest
 import respx
 from httpx import Response
 import json
+import asyncio
 from datetime import datetime, timedelta
+import domoticz_mcp.server as server_module
 from domoticz_mcp.server import (
     get_device, toggle_switch, get_room_devices, get_all_devices,
     _resolve_device_idx, _resolve_scene_idx, _resolve_user_variable_idx,
@@ -562,6 +564,51 @@ def test_client_lifecycle():
     client = create_client(own_client=True)
     assert client._owns_client is True
     assert client._own_client is True
+
+@pytest.mark.asyncio
+async def test_create_client_uses_direct_oauth_token(monkeypatch):
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", None)
+    monkeypatch.setattr(server_module, "DOMOTICZ_USERNAME", None)
+    monkeypatch.setattr(server_module, "DOMOTICZ_PASSWORD", None)
+    monkeypatch.setattr(server_module, "DOMOTICZ_OAUTH_TOKEN", "direct-token")
+    monkeypatch.setattr(server_module, "_oauth_token_cache", "direct-token")
+
+    async with create_client(own_client=True) as client:
+        assert client.headers["Authorization"] == "Bearer direct-token"
+        assert client.auth is None
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_concurrent_oauth_refresh_only_refreshes_once(tmp_path, monkeypatch):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "expired-token",
+        "refresh_token": "refresh-token",
+    }))
+
+    monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "client-id")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_SECRET", "client-secret")
+    monkeypatch.setattr(server_module, "TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(server_module, "_oauth_token_cache", "expired-token")
+
+    discovery_route = respx.get(
+        "https://domoticz.example/.well-known/openid-configuration"
+    ).mock(return_value=Response(200, json={
+        "token_endpoint": "https://domoticz.example/oauth/token",
+    }))
+    refresh_route = respx.post("https://domoticz.example/oauth/token").mock(
+        return_value=Response(200, json={"access_token": "fresh-token"})
+    )
+
+    tokens = await asyncio.gather(
+        server_module._fetch_oauth_token(force_refresh=True, old_token="expired-token"),
+        server_module._fetch_oauth_token(force_refresh=True, old_token="expired-token"),
+    )
+
+    assert tokens == ["fresh-token", "fresh-token"]
+    assert discovery_route.calls.call_count == 1
+    assert refresh_route.calls.call_count == 1
 
 @pytest.mark.asyncio
 @respx.mock

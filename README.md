@@ -113,7 +113,7 @@ docker run -d \
   -e DOMOTICZ_URL="http://192.168.1.100:8080" \
   -e DOMOTICZ_USERNAME="your_username" \
   -e DOMOTICZ_PASSWORD="your_password" \
-  ghcr.io/YOUR_GITHUB_USERNAME/domoticz-mcp:latest
+  ghcr.io/adrighem/domoticz-mcp:latest
 ```
 
 *Note: For the OAuth2 token flow to work and persist in Docker without interactive browser prompts, see the OAuth / API Token section below on how to mount the token file or use headless authentication.*
@@ -289,13 +289,15 @@ To develop and run tests for this project:
    ```
 3. Run the test suite:
    ```bash
-   uv run pytest tests/
+   uv run --extra dev pytest tests/
    ```
 
-   Or use `uv run` directly without installation:
+4. Build the package locally:
    ```bash
-   uv run --directory /path/to/domoticz-mcp pytest
+   uv run --extra dev python -m build
    ```
+
+You can also pass `--directory /path/to/domoticz-mcp` to either `uv run` command when running from outside the repository.
 
 ## License
 

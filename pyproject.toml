@@ -27,9 +27,10 @@ Issues = "https://github.com/adrighem/domoticz-mcp/issues"
 
 [project.optional-dependencies]
 dev = [
+    "build",
     "pytest",
     "pytest-asyncio",
-    "respx"
+    "respx",
 ]
 
 [project.scripts]
