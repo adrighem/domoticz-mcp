@@ -33,15 +33,15 @@ The server exposes **Tools** (for active control and modifications), **Resources
 ### Resources (Context)
 - **`domoticz://dashboard`**: Read a curated view of favorite and currently active devices (lights on, sensors active).
 - **`domoticz://devices`**: Read the current state of all Domoticz devices.
-- **`domoticz://device/{idx}`**, **`domoticz://device/{type}/{subtype}/{idx}`**, or **`domoticz://device/name/{name}`**: Read the current state of a specific device.
+- **`domoticz://device/{idx}`**, **`domoticz://device/{type}/{subtype}/{idx}`**, or **`domoticz://device/name/{name}`**: Read the current state of a specific device. In the typed form, `idx` is authoritative and `type`/`subtype` are descriptive path fields.
 - **`domoticz://rooms`**: Read configured rooms (Room Plans).
 - **`domoticz://room/{idx}`** or **`domoticz://room/{room_name}/{idx}`**: Read the full states of all devices within a specific room.
 - **`domoticz://scenes`**: Read configured scenes.
-- **`domoticz://scene/{idx}`** or **`domoticz://scene/name/{name}`**: Read the list of devices belonging to a specific scene.
+- **`domoticz://scene/{idx}`** or **`domoticz://scene/name/{name}`**: Read a specific scene/group entry.
 - **`domoticz://user-variables`**: Read the list of all Domoticz user variables.
 - **`domoticz://user-variable/{idx}`** or **`domoticz://user-variable/name/{name}`**: Read a specific Domoticz user variable.
 - **`domoticz://events` & `domoticz://event/{event_id}`**: Read the overview and specific source code of event scripts.
-- **`domoticz://log`**: Read the current Domoticz system log.
+- **`domoticz://logs`** or **`domoticz://log`**: Read the current Domoticz system log.
 - **`domoticz://logs/error`**: Read a filtered view containing only 'Error' level entries from the log.
 - **`domoticz://security`**: Read the current status of the security panel.
 - **`domoticz://settings`**: Read global Domoticz settings and configuration.
@@ -66,7 +66,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 ## Performance and Efficiency
 
 - **Caching:** The server implements a 5-minute TTL cache for devices, scenes, user variables, and rooms to significantly reduce API latency and Domoticz load.
-- **Connection Pooling:** Uses a persistent `httpx.AsyncClient` with proper lifecycle management for improved efficiency during long-running sessions. The server exposes `close_global_client()` for clean shutdown.
+- **HTTP Lifecycle:** Uses `httpx.AsyncClient` with consistent timeout, authentication setup, and explicit close handling for owned clients.
 
 ## Architecture
 

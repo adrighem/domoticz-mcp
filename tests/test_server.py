@@ -225,6 +225,21 @@ async def test_user_variable_tools():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_user_variable_tool_parameters_are_encoded():
+    from domoticz_mcp.server import add_user_variable, update_user_variable
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=adduservariable&vname=Name%20With%20Space&vtype=2&vvalue=a%26b%3D1").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    await add_user_variable("Name With Space", 2, "a&b=1")
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=updateuservariable&vname=Name%20With%20Space&vtype=2&vvalue=now%3Dyes%26later%3Dno").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    await update_user_variable("Name With Space", 2, "now=yes&later=no")
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_get_connectivity_report():
     from domoticz_mcp.server import get_connectivity_report
     from datetime import datetime, timedelta
@@ -343,6 +358,8 @@ async def test_scene_and_room_tools():
         return_value=Response(200, json={"status": "OK"})
     )
     await switch_scene("On", idx=1)
+    response = await switch_scene("Invalid", idx=1)
+    assert "Invalid command" in json.loads(response)["message"]
     
     # get_rooms
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true").mock(
@@ -393,6 +410,55 @@ async def test_resource_handlers():
         return_value=Response(200, json={"result": []})
     )
     await get_events_resource()
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_documented_resource_aliases():
+    from domoticz_mcp.server import (
+        get_device_by_name_resource,
+        get_device_by_type_resource,
+        get_log_alias_resource,
+        get_room_by_name_resource,
+        get_scene_by_name_resource,
+        get_scene_resource,
+        get_user_variable_by_name_resource,
+        get_user_variable_resource,
+    )
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json=DEVICES_MOCK_RESPONSE)
+    )
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid=2").mock(
+        return_value=Response(200, json={"result": [{"idx": "2", "Name": "Kitchen Light"}]})
+    )
+    assert "Kitchen Light" in await get_device_by_name_resource("Kitchen Light")
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid=45").mock(
+        return_value=Response(200, json={"result": [{"idx": "45", "Name": "Thermostat"}]})
+    )
+    assert "Thermostat" in await get_device_by_type_resource("Temp", "Thermostat", 45)
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&plan=10").mock(
+        return_value=Response(200, json={"result": [{"idx": "1", "Name": "Living Room Light"}]})
+    )
+    assert "Living Room Light" in await get_room_by_name_resource("Living Room", 10)
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getscenes").mock(
+        return_value=Response(200, json={"result": [{"idx": "101", "Name": "Movie Mode"}]})
+    )
+    assert json.loads(await get_scene_resource(101))["result"]["Name"] == "Movie Mode"
+    assert json.loads(await get_scene_by_name_resource("Movie Mode"))["result"]["idx"] == "101"
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getuservariables").mock(
+        return_value=Response(200, json={"result": [{"idx": "50", "Name": "MyVar"}]})
+    )
+    assert json.loads(await get_user_variable_resource(50))["result"]["Name"] == "MyVar"
+    assert json.loads(await get_user_variable_by_name_resource("MyVar"))["result"]["idx"] == "50"
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime=0&loglevel=268435455").mock(
+        return_value=Response(200, json={"result": [{"message": "Log entry"}]})
+    )
+    assert "Log entry" in await get_log_alias_resource()
 
 @pytest.mark.asyncio
 @respx.mock
@@ -636,6 +702,13 @@ def test_format_response_helper():
     test_data = {"status": "OK", "result": {"count": 1}}
     resp = _format_response(test_data)
     assert json.loads(resp) == test_data
+
+def test_command_url_helper_encodes_query_params():
+    from domoticz_mcp.server import _command_url
+
+    assert _command_url("addlogmessage", {"message": "a&b=1"}) == (
+        f"{DOMOTICZ_API_URL}?type=command&param=addlogmessage&message=a%26b%3D1"
+    )
 
 @pytest.mark.asyncio
 @respx.mock

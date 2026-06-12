@@ -98,6 +98,15 @@ def _error_response(message: str, status: str = "error") -> str:
     """Format an error response as a JSON string."""
     return json.dumps({"status": status, "message": message})
 
+
+def _command_url(param: str, params: Optional[Dict[str, Any]] = None) -> str:
+    """Build a Domoticz command URL with encoded query parameters."""
+    query: Dict[str, Any] = {"type": "command", "param": param}
+    if params:
+        query.update(params)
+    return f"{DOMOTICZ_API_URL}?{urllib.parse.urlencode(query, quote_via=urllib.parse.quote)}"
+
+
 def _do_interactive_oauth_flow():
     code = None
     state_received = None
@@ -463,6 +472,20 @@ async def get_scenes() -> str:
         scenes = await _get_cached_data(client, _scene_cache, f"{DOMOTICZ_API_URL}?type=command&param=getscenes")
         return json.dumps({"status": "OK", "result": scenes})
 
+
+async def get_scene(idx: int | None = None, name: str | None = None) -> str:
+    """Internal: Get a specific scene or group from the scene list."""
+    async with create_client() as client:
+        resolved_idx = await _resolve_scene_idx(client, idx, name)
+        if not resolved_idx:
+            return _error_response("Scene not found")
+        scenes = await _get_cached_data(client, _scene_cache, f"{DOMOTICZ_API_URL}?type=command&param=getscenes")
+        for scene in scenes:
+            if str(scene.get("idx")) == str(resolved_idx):
+                return json.dumps({"status": "OK", "result": scene})
+        return _error_response("Scene not found")
+
+
 async def get_rooms() -> str:
     """Internal: Get all rooms."""
     async with create_client() as client:
@@ -489,6 +512,20 @@ async def get_user_variables() -> str:
     async with create_client() as client:
         vars = await _get_cached_data(client, _user_variable_cache, f"{DOMOTICZ_API_URL}?type=command&param=getuservariables")
         return json.dumps({"status": "OK", "result": vars})
+
+
+async def get_user_variable(idx: int | None = None, name: str | None = None) -> str:
+    """Internal: Get a specific user variable from the variable list."""
+    async with create_client() as client:
+        resolved_idx = await _resolve_user_variable_idx(client, idx, name)
+        if not resolved_idx:
+            return _error_response("User variable not found")
+        variables = await _get_cached_data(client, _user_variable_cache, f"{DOMOTICZ_API_URL}?type=command&param=getuservariables")
+        for variable in variables:
+            if str(variable.get("idx")) == str(resolved_idx):
+                return json.dumps({"status": "OK", "result": variable})
+        return _error_response("User variable not found")
+
 
 async def get_battery_levels(threshold: int = 20) -> str:
     """Internal: Get low battery levels."""
@@ -600,10 +637,30 @@ async def get_device_resource(idx: int) -> str:
     """Specific: metadata and current state for one device."""
     return await get_device(idx=idx)
 
+@mcp.resource("domoticz://device/{type}/{subtype}/{idx}")
+async def get_device_by_type_resource(type: str, subtype: str, idx: int) -> str:
+    """Alias: typed device URI; type/subtype are descriptive, idx is authoritative."""
+    return await get_device(idx=idx)
+
+@mcp.resource("domoticz://device/name/{name}")
+async def get_device_by_name_resource(name: str) -> str:
+    """Specific: metadata and current state for one named device."""
+    return await get_device(name=name)
+
 @mcp.resource("domoticz://scenes")
 async def get_scenes_resource() -> str:
     """List: configured scenes and groups."""
     return await get_scenes()
+
+@mcp.resource("domoticz://scene/{idx}")
+async def get_scene_resource(idx: int) -> str:
+    """Specific: one configured scene or group."""
+    return await get_scene(idx=idx)
+
+@mcp.resource("domoticz://scene/name/{name}")
+async def get_scene_by_name_resource(name: str) -> str:
+    """Specific: one named scene or group."""
+    return await get_scene(name=name)
 
 @mcp.resource("domoticz://rooms")
 async def get_rooms_resource() -> str:
@@ -615,10 +672,25 @@ async def get_room_resource(idx: int) -> str:
     """Group: status of all devices in a room."""
     return await get_room_devices(idx=idx)
 
+@mcp.resource("domoticz://room/{room_name}/{idx}")
+async def get_room_by_name_resource(room_name: str, idx: int) -> str:
+    """Alias: named room URI; idx selects the room."""
+    return await get_room_devices(idx=idx)
+
 @mcp.resource("domoticz://user-variables")
 async def get_user_variables_resource() -> str:
     """System: current values of user-defined variables."""
     return await get_user_variables()
+
+@mcp.resource("domoticz://user-variable/{idx}")
+async def get_user_variable_resource(idx: int) -> str:
+    """Specific: one user-defined variable."""
+    return await get_user_variable(idx=idx)
+
+@mcp.resource("domoticz://user-variable/name/{name}")
+async def get_user_variable_by_name_resource(name: str) -> str:
+    """Specific: one named user-defined variable."""
+    return await get_user_variable(name=name)
 
 @mcp.resource("domoticz://battery-alerts")
 async def get_battery_levels_resource() -> str:
@@ -654,6 +726,11 @@ async def get_log_resource() -> str:
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime=0&loglevel=268435455")
         return response.text
+
+@mcp.resource("domoticz://log")
+async def get_log_alias_resource() -> str:
+    """Alias: recent system logs."""
+    return await get_log_resource()
 
 @mcp.resource("domoticz://logs/error")
 async def get_error_logs_resource() -> str:
@@ -747,17 +824,20 @@ async def control_blinds(command: str, idx: int | None = None, name: str | None 
 @mcp.tool()
 async def switch_scene(command: str, idx: int | None = None, name: str | None = None) -> str:
     """Activate scene. 'On'/'Off'/'Toggle'. Preferred: `idx`. Cross-ref: `domoticz://scenes`."""
+    scene_command = command.capitalize()
+    if scene_command not in ["On", "Off", "Toggle"]:
+        return _error_response("Invalid command")
     async with create_client() as client:
         resolved_idx = await _resolve_scene_idx(client, idx, name)
         if not resolved_idx: return _error_response("Scene not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=switchscene&idx={resolved_idx}&switchcmd={command.capitalize()}")
+        response = await _do_request(client, "GET", _command_url("switchscene", {"idx": resolved_idx, "switchcmd": scene_command}))
         return response.text
 
 @mcp.tool()
 async def add_user_variable(name: str, vtype: int, value: str) -> str:
     """Add var. vtype: 0=Int, 1=Float, 2=Str, 3=Date, 4=Time. Cross-ref: `domoticz://user-variables`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=adduservariable&vname={name}&vtype={vtype}&vvalue={value}")
+        response = await _do_request(client, "GET", _command_url("adduservariable", {"vname": name, "vtype": vtype, "vvalue": value}))
         _user_variable_cache["timestamp"] = 0
         return response.text
 
@@ -765,7 +845,7 @@ async def add_user_variable(name: str, vtype: int, value: str) -> str:
 async def update_user_variable(name: str, vtype: int, value: str) -> str:
     """Update var value. Cross-ref: `domoticz://user-variables`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=updateuservariable&vname={name}&vtype={vtype}&vvalue={value}")
+        response = await _do_request(client, "GET", _command_url("updateuservariable", {"vname": name, "vtype": vtype, "vvalue": value}))
         _user_variable_cache["timestamp"] = 0
         return response.text
 
@@ -799,8 +879,7 @@ async def update_event(event_id: int, name: str, interpreter: str, event_type: s
 async def call_domoticz_api(param: str, kwargs: dict) -> str:
     """Raw API call. Use if dedicated tools fail."""
     async with create_client() as client:
-        url = f"{DOMOTICZ_API_URL}?type=command&param={param}&{urllib.parse.urlencode(kwargs)}"
-        response = await _do_request(client, "GET", url)
+        response = await _do_request(client, "GET", _command_url(param, kwargs))
         return response.text
 
 @mcp.tool()
@@ -817,7 +896,7 @@ async def rename_device(new_name: str, idx: int | None = None, old_name: str | N
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, old_name)
         if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=renamedevice&name={urllib.parse.quote(new_name)}&idx={resolved_idx}")
+        response = await _do_request(client, "GET", _command_url("renamedevice", {"name": new_name, "idx": resolved_idx}))
         _device_cache["timestamp"] = 0
         return response.text
 
@@ -835,7 +914,7 @@ async def delete_device(idx: int | None = None, name: str | None = None) -> str:
 async def create_virtual_sensor(hw_idx: int, sensorname: str, sensortype: int) -> str:
     """Create dummy. Cross-ref: `domoticz://hardware`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=createvirtualsensor&idx={hw_idx}&sensorname={urllib.parse.quote(sensorname)}&sensortype={sensortype}")
+        response = await _do_request(client, "GET", _command_url("createvirtualsensor", {"idx": hw_idx, "sensorname": sensorname, "sensortype": sensortype}))
         _device_cache["timestamp"] = 0
         return response.text
 
@@ -845,28 +924,28 @@ async def update_device_value(idx: int | None = None, name: str | None = None, n
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
         if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=udevice&idx={resolved_idx}&nvalue={nvalue}&svalue={urllib.parse.quote(svalue)}")
+        response = await _do_request(client, "GET", _command_url("udevice", {"idx": resolved_idx, "nvalue": nvalue, "svalue": svalue}))
         return response.text
 
 @mcp.tool()
 async def add_log_message(message: str, level: int = 2) -> str:
     """Log message. level: 1=Normal, 2=Status, 4=Error. Cross-ref: `domoticz://logs`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=addlogmessage&message={urllib.parse.quote(message)}&level={level}")
+        response = await _do_request(client, "GET", _command_url("addlogmessage", {"message": message, "level": level}))
         return response.text
 
 @mcp.tool()
 async def send_notification(subject: str, body: str) -> str:
     """Send notification."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=sendnotification&subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}")
+        response = await _do_request(client, "GET", _command_url("sendnotification", {"subject": subject, "body": body}))
         return response.text
 
 @mcp.tool()
 async def set_security_status(secstatus: int, seccode: str) -> str:
     """Arm panel. 0=Disarm, 1=Home, 2=Away. Cross-ref: `domoticz://security`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=setsecstatus&secstatus={secstatus}&seccode={urllib.parse.quote(seccode)}")
+        response = await _do_request(client, "GET", _command_url("setsecstatus", {"secstatus": secstatus, "seccode": seccode}))
         return response.text
 
 @mcp.tool()
