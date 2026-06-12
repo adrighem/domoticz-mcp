@@ -1,10 +1,12 @@
 import pytest
 import respx
+import httpx
 from httpx import Response
 import json
 import asyncio
 from datetime import datetime, timedelta
 import domoticz_mcp.server as server_module
+import domoticz_mcp.server as server
 from domoticz_mcp.server import (
     get_device, toggle_switch, get_room_devices, get_all_devices,
     _resolve_device_idx, _resolve_scene_idx, _resolve_user_variable_idx,
@@ -221,7 +223,9 @@ async def test_user_variable_tools():
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=deleteuservariable&idx=5").mock(
         return_value=Response(200, json={"status": "OK"})
     )
-    await delete_user_variable(name="DeleteMe")
+    response = await delete_user_variable(name="DeleteMe")
+    assert "Confirmation required" in json.loads(response)["message"]
+    await delete_user_variable(name="DeleteMe", confirm=True)
 
 @pytest.mark.asyncio
 @respx.mock
@@ -268,8 +272,12 @@ async def test_analyze_energy_usage():
     from domoticz_mcp.server import analyze_energy_usage
     mock_data = {
         "result": [
-            {"idx": "1", "Name": "Heater", "Usage": "2000W", "CounterToday": "5kWh"},
-            {"idx": "2", "Name": "Light", "Data": "On"} # No energy data
+            {"idx": "1", "Name": "Heater", "Type": "Usage", "Usage": "2000W", "CounterToday": "5kWh"},
+            {"idx": "2", "Name": "Light", "Data": "On"}, # No energy data
+            {"idx": "3", "Name": "Solar Inverter", "Usage": "1.5 kW", "CounterToday": "3.2 kWh"},
+            {"idx": "4", "Name": "Smart Meter", "Type": "P1 Smart Meter", "Usage": "500 Watt", "UsageDeliv": "100W", "CounterToday": "2.5 kWh", "CounterDelivToday": "0.4 kWh"},
+            {"idx": "5", "Name": "Gas Meter", "Type": "Gas", "CounterToday": "0.183 m3"},
+            {"idx": "6", "Name": "Water Meter", "Type": "Water", "CounterToday": "120 L"}
         ]
     }
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
@@ -278,8 +286,91 @@ async def test_analyze_energy_usage():
     
     response = await analyze_energy_usage()
     data = json.loads(response)
-    assert len(data["result"]) == 1
+    assert len(data["result"]) == 5
+    assert data["summary"]["devices_with_energy_data"] == 5
+    assert data["summary"]["current"]["electricity_consumption_w"] == 2500
+    assert data["summary"]["current"]["electricity_generation_w"] == 1500
+    assert data["summary"]["current"]["electricity_export_w"] == 100
+    assert data["summary"]["current"]["net_electricity_w"] == 900
+    assert data["summary"]["today"]["electricity_consumption_kwh"] == 7.5
+    assert data["summary"]["today"]["electricity_generation_kwh"] == 3.2
+    assert data["summary"]["today"]["electricity_export_kwh"] == 0.4
+    assert data["summary"]["today"]["gas_m3"] == 0.183
+    assert data["summary"]["today"]["water_m3"] == 0.12
+    assert data["summary"]["top_current_consumers"][0]["Name"] == "Heater"
     assert data["result"][0]["Name"] == "Heater"
+    assert data["result"][0]["current_power_w"] == 2000
+    assert data["result"][0]["today_kwh"] == 5
+    assert data["result"][0]["TodayTotal"] == "5kWh"
+    categories = {entry["Name"]: entry["category"] for entry in data["result"]}
+    assert categories["Solar Inverter"] == "electricity_generation"
+    assert categories["Gas Meter"] == "gas"
+    assert categories["Water Meter"] == "water"
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_energy_history_tools(monkeypatch):
+    from domoticz_mcp.server import get_daily_energy_history, get_monthly_energy_history, get_weekly_energy_history
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 12, 10, 0, 0)
+
+    monkeypatch.setattr(server, "datetime", FixedDateTime)
+
+    devices = {
+        "result": [
+            {"idx": "1", "Name": "Smart Meter", "Type": "P1 Smart Meter"},
+            {"idx": "2", "Name": "Gas Meter", "Type": "Gas"},
+        ]
+    }
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json=devices)
+    )
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=graph&sensor=counter&idx=1&range=day&method=1").mock(
+        return_value=Response(200, json={
+            "status": "OK",
+            "title": "Daily power",
+            "result": [
+                {"d": "2026-06-12 10:00", "u": "100 W"},
+                {"d": "2026-06-12 10:05", "u": "0.2 kW"},
+            ],
+        })
+    )
+    daily = json.loads(await get_daily_energy_history(idx=1))
+    assert daily["include_instantaneous"] is True
+    assert daily["summary"]["power"]["max_w"] == 200
+    assert daily["summary"]["power"]["avg_w"] == 150
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=graph&sensor=counter&idx=1&range=2026-06-06T2026-06-12").mock(
+        return_value=Response(200, json={
+            "status": "OK",
+            "title": "Weekly energy",
+            "result": [
+                {"d": "2026-06-11", "v": "2.5 kWh"},
+                {"d": "2026-06-12", "v": "3.0 kWh"},
+            ],
+        })
+    )
+    weekly = json.loads(await get_weekly_energy_history(name="Smart Meter"))
+    assert weekly["range"] == "2026-06-06T2026-06-12"
+    assert weekly["summary"]["energy"]["total_kwh"] == 5.5
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=graph&sensor=counter&idx=2&range=month").mock(
+        return_value=Response(200, json={
+            "status": "OK",
+            "title": "Monthly gas",
+            "result": [
+                {"d": "2026-06-01", "v": "0.4 m3"},
+                {"d": "2026-06-02", "v": "0.6 m3"},
+            ],
+        })
+    )
+    monthly = json.loads(await get_monthly_energy_history(idx=2))
+    assert monthly["summary"]["category"] == "gas"
+    assert monthly["summary"]["volume"]["total_m3"] == 1.0
 
 @pytest.mark.asyncio
 @respx.mock
@@ -631,6 +722,10 @@ def test_client_lifecycle():
     assert client._owns_client is True
     assert client._own_client is True
 
+def test_default_domoticz_url_is_localhost():
+    assert server_module.DOMOTICZ_BASE_URL == "http://127.0.0.1:8080"
+    assert server_module.DOMOTICZ_API_URL == "http://127.0.0.1:8080/json.htm"
+
 @pytest.mark.asyncio
 async def test_create_client_uses_direct_oauth_token(monkeypatch):
     monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", None)
@@ -675,6 +770,30 @@ async def test_concurrent_oauth_refresh_only_refreshes_once(tmp_path, monkeypatc
     assert tokens == ["fresh-token", "fresh-token"]
     assert discovery_route.calls.call_count == 1
     assert refresh_route.calls.call_count == 1
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_do_request_updates_client_headers_after_oauth_refresh(monkeypatch):
+    url = "https://domoticz.example/json.htm?type=command&param=getversion"
+    route = respx.get(url).mock(side_effect=[
+        Response(401, json={"status": "ERR"}),
+        Response(200, json={"status": "OK"}),
+    ])
+
+    async def fake_fetch_oauth_token(force_refresh=False, old_token=None):
+        server_module._oauth_token_cache = "fresh-token"
+        return "fresh-token"
+
+    monkeypatch.setattr(server_module, "_oauth_token_cache", "expired-token")
+    monkeypatch.setattr(server_module, "_fetch_oauth_token", fake_fetch_oauth_token)
+
+    async with httpx.AsyncClient(headers={"Authorization": "Bearer expired-token"}) as client:
+        response = await server_module._do_request(client, "GET", url)
+        assert response.json()["status"] == "OK"
+        assert client.headers["Authorization"] == "Bearer fresh-token"
+
+    assert route.calls[0].request.headers["Authorization"] == "Bearer expired-token"
+    assert route.calls[1].request.headers["Authorization"] == "Bearer fresh-token"
 
 @pytest.mark.asyncio
 @respx.mock
@@ -730,7 +849,9 @@ async def test_new_tools():
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=testparam&myarg=1").mock(
         return_value=Response(200, json={"status": "OK"})
     )
-    response = await call_domoticz_api("testparam", {"myarg": "1"})
+    response_fail = await call_domoticz_api("testparam", {"myarg": "1"})
+    assert "Confirmation required" in json.loads(response_fail)["message"]
+    response = await call_domoticz_api("testparam", {"myarg": "1"}, confirm=True)
     assert json.loads(response)["status"] == "OK"
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=checkforupdate").mock(
         return_value=Response(200, json={"status": "OK", "HaveUpdate": False})
@@ -748,6 +869,38 @@ async def test_new_tools():
         return_value=Response(200, content=b"fakeimage")
     )
     response = await get_camera_snapshot(1)
+    assert json.loads(response)["status"] == "OK"
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_high_impact_tools_require_confirmation():
+    from domoticz_mcp.server import delete_device, set_security_status, update_event
+
+    response = await set_security_status(1, "1234")
+    assert "Confirmation required" in json.loads(response)["message"]
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=setsecstatus&secstatus=1&seccode=1234").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    response = await set_security_status(1, "1234", confirm=True)
+    assert json.loads(response)["status"] == "OK"
+
+    response = await update_event(10, "AutoLight", "python", "device", "print('on')")
+    assert "Confirmation required" in json.loads(response)["message"]
+    respx.post(f"{DOMOTICZ_API_URL}?type=command&param=events").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    response = await update_event(10, "AutoLight", "python", "device", "print('on')", confirm=True)
+    assert json.loads(response)["status"] == "OK"
+
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json=DEVICES_MOCK_RESPONSE)
+    )
+    response = await delete_device(name="Kitchen Light")
+    assert "Confirmation required" in json.loads(response)["message"]
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=setused&used=false&idx=2").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    response = await delete_device(name="Kitchen Light", confirm=True)
     assert json.loads(response)["status"] == "OK"
 
 @pytest.mark.asyncio

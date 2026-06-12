@@ -21,6 +21,7 @@ import secrets
 import webbrowser
 import threading
 import asyncio
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 from datetime import datetime, timedelta
@@ -70,7 +71,7 @@ class InvalidParameterError(DomoticzError):
 mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), stateless_http=True)
 
 # Configuration defaults
-DOMOTICZ_BASE_URL = "https://xmpp.vanadrighem.eu/domoticz"
+DOMOTICZ_BASE_URL = "http://127.0.0.1:8080"
 DOMOTICZ_API_URL = f"{DOMOTICZ_BASE_URL}/json.htm"
 DOMOTICZ_USERNAME = None
 DOMOTICZ_PASSWORD = None
@@ -97,6 +98,11 @@ def _format_response(data: Dict[str, Any]) -> str:
 def _error_response(message: str, status: str = "error") -> str:
     """Format an error response as a JSON string."""
     return json.dumps({"status": status, "message": message})
+
+
+def _confirmation_required(action: str) -> str:
+    """Format a confirmation-required error response."""
+    return _error_response(f"Confirmation required for {action}. Retry with confirm=True.")
 
 
 def _command_url(param: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -298,7 +304,9 @@ async def _do_request(client: httpx.AsyncClient, method: str, url: str, **kwargs
             # Token might be expired. Re-fetch token (this will trigger OAuth flow if needed)
             new_token = await _fetch_oauth_token(force_refresh=True, old_token=used_token)
             if new_token:
-                # Update headers for the retry
+                client.headers["Authorization"] = f"Bearer {new_token}"
+                client.auth = None
+
                 if "headers" not in kwargs:
                     kwargs["headers"] = {}
                 kwargs["headers"]["Authorization"] = f"Bearer {new_token}"
@@ -412,6 +420,318 @@ def _simplify_device(dev: Dict[str, Any]) -> Dict[str, Any]:
 def _paginate(data: list, offset: int, limit: int) -> list:
     """Paginate a list of results."""
     return data[offset:offset + limit]
+
+
+def _parse_number(value: Any) -> Optional[float]:
+    """Parse the first numeric value from a Domoticz value string."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    match = re.search(r"-?\d+(?:[.,]\d+)?", value.replace(" ", ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _parse_power_w(value: Any) -> Optional[float]:
+    number = _parse_number(value)
+    if number is None:
+        return None
+    text = str(value).lower()
+    if "mw" in text and "mwh" not in text:
+        return number * 1_000_000
+    if "kw" in text and "kwh" not in text:
+        return number * 1000
+    return number
+
+
+def _parse_energy_kwh(value: Any, assume_energy: bool = True) -> Optional[float]:
+    number = _parse_number(value)
+    if number is None:
+        return None
+    text = str(value).lower()
+    if "mwh" in text:
+        return number * 1000
+    if "kwh" in text:
+        return number
+    if "wh" in text:
+        return number / 1000
+    if "m3" in text or "m³" in text or "liter" in text or "litre" in text:
+        return None
+    return number if assume_energy else None
+
+
+def _parse_volume_m3(value: Any, assume_volume: bool = True) -> Optional[float]:
+    number = _parse_number(value)
+    if number is None:
+        return None
+    text = str(value).lower().strip()
+    if "m3" in text or "m³" in text:
+        return number
+    if "liter" in text or "litre" in text or re.search(r"\d\s*l$", text):
+        return number / 1000
+    return number if assume_volume else None
+
+
+def _classify_energy_device(dev: Dict[str, Any]) -> str:
+    text = " ".join(
+        str(dev.get(field, ""))
+        for field in ["Name", "Type", "SubType", "SwitchType", "TypeImg", "HardwareName"]
+    ).lower()
+    if "water" in text:
+        return "water"
+    if "gas" in text:
+        return "gas"
+    if any(term in text for term in ["solar", "pv", "inverter", "generation", "generated"]):
+        return "electricity_generation"
+    if any(term in text for term in ["battery", "powerwall", "storage", "accu"]):
+        return "storage"
+    return "electricity"
+
+
+def _energy_device_entry(dev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    category = _classify_energy_device(dev)
+    current_power_w = _parse_power_w(dev.get("Usage"))
+    delivered_power_w = _parse_power_w(dev.get("UsageDeliv"))
+    today_kwh = None
+    today_m3 = None
+
+    if category in ["gas", "water"]:
+        today_m3 = _parse_volume_m3(dev.get("CounterToday"))
+    else:
+        today_kwh = _parse_energy_kwh(dev.get("CounterToday"))
+
+    delivered_today_kwh = _parse_energy_kwh(dev.get("CounterDelivToday"), assume_energy=False)
+    total_kwh = _parse_energy_kwh(dev.get("Counter"), assume_energy=False)
+    delivered_total_kwh = _parse_energy_kwh(dev.get("CounterDeliv"), assume_energy=False)
+
+    if all(value is None for value in [current_power_w, delivered_power_w, today_kwh, today_m3, delivered_today_kwh, total_kwh, delivered_total_kwh]):
+        return None
+
+    entry: Dict[str, Any] = {
+        "idx": dev.get("idx"),
+        "Name": dev.get("Name"),
+        "category": category,
+        "Usage": dev.get("Usage"),
+        "TodayTotal": dev.get("CounterToday"),
+        "current_power_w": current_power_w,
+        "delivered_power_w": delivered_power_w,
+        "today_kwh": today_kwh,
+        "today_m3": today_m3,
+        "delivered_today_kwh": delivered_today_kwh,
+        "total_kwh": total_kwh,
+        "delivered_total_kwh": delivered_total_kwh,
+    }
+    return {key: value for key, value in entry.items() if value is not None}
+
+
+def _summarize_energy(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary = {
+        "devices_with_energy_data": len(entries),
+        "current": {
+            "electricity_consumption_w": 0.0,
+            "electricity_generation_w": 0.0,
+            "electricity_export_w": 0.0,
+            "storage_w": 0.0,
+            "net_electricity_w": 0.0,
+        },
+        "today": {
+            "electricity_consumption_kwh": 0.0,
+            "electricity_generation_kwh": 0.0,
+            "electricity_export_kwh": 0.0,
+            "gas_m3": 0.0,
+            "water_m3": 0.0,
+        },
+        "top_current_consumers": [],
+        "top_daily_consumers": [],
+    }
+
+    for entry in entries:
+        category = entry.get("category")
+        current_power_w = float(entry.get("current_power_w", 0.0))
+        delivered_power_w = float(entry.get("delivered_power_w", 0.0))
+        today_kwh = float(entry.get("today_kwh", 0.0))
+        delivered_today_kwh = float(entry.get("delivered_today_kwh", 0.0))
+        today_m3 = float(entry.get("today_m3", 0.0))
+
+        if category == "electricity_generation":
+            summary["current"]["electricity_generation_w"] += current_power_w
+            summary["today"]["electricity_generation_kwh"] += today_kwh
+        elif category == "storage":
+            summary["current"]["storage_w"] += current_power_w
+            summary["today"]["electricity_consumption_kwh"] += today_kwh
+        elif category == "gas":
+            summary["today"]["gas_m3"] += today_m3
+        elif category == "water":
+            summary["today"]["water_m3"] += today_m3
+        else:
+            summary["current"]["electricity_consumption_w"] += current_power_w
+            summary["today"]["electricity_consumption_kwh"] += today_kwh
+
+        summary["current"]["electricity_export_w"] += delivered_power_w
+        summary["today"]["electricity_export_kwh"] += delivered_today_kwh
+
+    summary["current"]["net_electricity_w"] = (
+        summary["current"]["electricity_consumption_w"]
+        - summary["current"]["electricity_generation_w"]
+        - summary["current"]["electricity_export_w"]
+    )
+
+    def ranked_projection(entry: Dict[str, Any], value_key: str) -> Dict[str, Any]:
+        return {
+            "idx": entry.get("idx"),
+            "Name": entry.get("Name"),
+            value_key: entry.get(value_key),
+            "category": entry.get("category"),
+        }
+
+    current_consumers = [
+        entry for entry in entries
+        if entry.get("category") in ["electricity", "storage"] and entry.get("current_power_w") is not None
+    ]
+    daily_consumers = [
+        entry for entry in entries
+        if entry.get("category") in ["electricity", "storage"] and entry.get("today_kwh") is not None
+    ]
+    summary["top_current_consumers"] = [
+        ranked_projection(entry, "current_power_w")
+        for entry in sorted(current_consumers, key=lambda item: item.get("current_power_w", 0), reverse=True)[:5]
+    ]
+    summary["top_daily_consumers"] = [
+        ranked_projection(entry, "today_kwh")
+        for entry in sorted(daily_consumers, key=lambda item: item.get("today_kwh", 0), reverse=True)[:5]
+    ]
+
+    return summary
+
+
+def _energy_history_range(period: str) -> str:
+    if period == "day":
+        return "day"
+    if period == "month":
+        return "month"
+    if period == "week":
+        today = datetime.now().date()
+        start = today - timedelta(days=6)
+        return f"{start.isoformat()}T{today.isoformat()}"
+    raise InvalidParameterError("period must be 'day', 'week', or 'month'")
+
+
+def _normalize_energy_history_row(row: Dict[str, Any], category: str) -> Dict[str, Any]:
+    normalized = dict(row)
+    numeric_fields = {}
+
+    for key, value in row.items():
+        if key == "d":
+            continue
+        number = _parse_number(value)
+        if number is not None:
+            numeric_fields[key] = number
+
+    if numeric_fields:
+        normalized["numeric"] = numeric_fields
+
+    for key in ["u", "usage", "Usage"]:
+        if key in row:
+            power_w = _parse_power_w(row[key])
+            if power_w is not None:
+                normalized["power_w"] = power_w
+                break
+
+    for key in ["v", "value", "counter", "c", "Counter"]:
+        if key not in row:
+            continue
+        if category in ["gas", "water"]:
+            volume_m3 = _parse_volume_m3(row[key])
+            if volume_m3 is not None:
+                normalized["volume_m3"] = volume_m3
+                break
+        else:
+            energy_kwh = _parse_energy_kwh(row[key])
+            if energy_kwh is not None:
+                normalized["energy_kwh"] = energy_kwh
+                break
+
+    return normalized
+
+
+def _summarize_energy_history(records: List[Dict[str, Any]], category: str) -> Dict[str, Any]:
+    power_values = [record["power_w"] for record in records if "power_w" in record]
+    energy_values = [record["energy_kwh"] for record in records if "energy_kwh" in record]
+    volume_values = [record["volume_m3"] for record in records if "volume_m3" in record]
+
+    summary: Dict[str, Any] = {"samples": len(records), "category": category}
+
+    if power_values:
+        summary["power"] = {
+            "min_w": min(power_values),
+            "max_w": max(power_values),
+            "avg_w": sum(power_values) / len(power_values),
+        }
+    if energy_values:
+        summary["energy"] = {
+            "total_kwh": sum(energy_values),
+            "min_kwh": min(energy_values),
+            "max_kwh": max(energy_values),
+        }
+    if volume_values:
+        summary["volume"] = {
+            "total_m3": sum(volume_values),
+            "min_m3": min(volume_values),
+            "max_m3": max(volume_values),
+        }
+
+    return summary
+
+
+async def _get_energy_history(
+    period: str,
+    idx: int | None = None,
+    name: str | None = None,
+    include_instantaneous: bool = False
+) -> str:
+    """Internal: Get counter graph history for energy, gas, and water meters."""
+    range_param = _energy_history_range(period)
+    async with create_client() as client:
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if not resolved_idx:
+            return _error_response("Device not found")
+
+        device_name = name
+        category = "electricity"
+        devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
+        for device in devices:
+            if str(device.get("idx")) == str(resolved_idx):
+                device_name = device.get("Name") or device_name
+                category = _classify_energy_device(device)
+                break
+
+        params: Dict[str, Any] = {"sensor": "counter", "idx": resolved_idx, "range": range_param}
+        if period == "day" and include_instantaneous:
+            params["method"] = 1
+
+        response = await _do_request(client, "GET", _command_url("graph", params))
+        data = response.json()
+        records = [
+            _normalize_energy_history_row(row, category)
+            for row in data.get("result", [])
+            if isinstance(row, dict)
+        ]
+        return json.dumps({
+            "status": data.get("status", "OK"),
+            "title": data.get("title"),
+            "period": period,
+            "range": range_param,
+            "idx": resolved_idx,
+            "Name": device_name,
+            "include_instantaneous": include_instantaneous if period == "day" else False,
+            "summary": _summarize_energy_history(records, category),
+            "result": records,
+        })
 
 # --- Core Functions (Used by Resources and Tests) ---
 
@@ -591,8 +911,9 @@ async def analyze_energy_usage() -> str:
     """Internal: Analyze energy usage."""
     async with create_client() as client:
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
-        results = [{"idx": d.get("idx"), "Name": d.get("Name"), "Usage": d.get("Usage"), "TodayTotal": d.get("CounterToday")} for d in devices if d.get("Usage") or d.get("CounterToday")]
-        return json.dumps({"status": "OK", "result": results})
+        results = [entry for entry in (_energy_device_entry(d) for d in devices) if entry is not None]
+        results.sort(key=lambda item: item.get("current_power_w", 0), reverse=True)
+        return json.dumps({"status": "OK", "summary": _summarize_energy(results), "result": results})
 
 async def search_scripts(query: str) -> str:
     """Internal: Search scripts."""
@@ -774,6 +1095,21 @@ async def search_devices_tool(query: str, offset: int = 0, limit: int = 50) -> s
     return await search_devices(query, offset, limit)
 
 @mcp.tool()
+async def get_daily_energy_history(idx: int | None = None, name: str | None = None, include_instantaneous: bool = True) -> str:
+    """Read today's counter history. Preferred: `idx`. Set `include_instantaneous=False` for daily totals."""
+    return await _get_energy_history("day", idx=idx, name=name, include_instantaneous=include_instantaneous)
+
+@mcp.tool()
+async def get_weekly_energy_history(idx: int | None = None, name: str | None = None) -> str:
+    """Read the last 7 days of counter history. Preferred: `idx`."""
+    return await _get_energy_history("week", idx=idx, name=name)
+
+@mcp.tool()
+async def get_monthly_energy_history(idx: int | None = None, name: str | None = None) -> str:
+    """Read this month's counter history. Preferred: `idx`."""
+    return await _get_energy_history("month", idx=idx, name=name)
+
+@mcp.tool()
 async def toggle_switch(idx: int | None = None, name: str | None = None) -> str:
     """Toggle device. Preferred: `idx`. Cross-ref: `set_switch_state`."""
     async with create_client() as client:
@@ -850,8 +1186,10 @@ async def update_user_variable(name: str, vtype: int, value: str) -> str:
         return response.text
 
 @mcp.tool()
-async def delete_user_variable(idx: int | None = None, name: str | None = None) -> str:
-    """Delete var. Preferred: `idx`."""
+async def delete_user_variable(idx: int | None = None, name: str | None = None, confirm: bool = False) -> str:
+    """Delete var. Preferred: `idx`. Requires `confirm=True`."""
+    if not confirm:
+        return _confirmation_required("deleting a user variable")
     async with create_client() as client:
         resolved_idx = await _resolve_user_variable_idx(client, idx, name)
         if not resolved_idx: return _error_response("Var not found")
@@ -868,16 +1206,20 @@ async def create_event(name: str, interpreter: str, event_type: str, xmlstatemen
         return response.text
 
 @mcp.tool()
-async def update_event(event_id: int, name: str, interpreter: str, event_type: str, xmlstatement: str, eventstatus: str = "1") -> str:
-    """Update script. Cross-ref: `domoticz://event/{event_id}`."""
+async def update_event(event_id: int, name: str, interpreter: str, event_type: str, xmlstatement: str, eventstatus: str = "1", confirm: bool = False) -> str:
+    """Update script. Cross-ref: `domoticz://event/{event_id}`. Requires `confirm=True`."""
+    if not confirm:
+        return _confirmation_required("updating an event script")
     async with create_client() as client:
         data = {"evparam": "create", "eventid": str(event_id), "name": name, "eventstatus": eventstatus, "interpreter": interpreter, "xml": xmlstatement, "eventtype": event_type, "logicarray": ""}
         response = await _do_request(client, "POST", f"{DOMOTICZ_API_URL}?type=command&param=events", data=data)
         return response.text
 
 @mcp.tool()
-async def call_domoticz_api(param: str, kwargs: dict) -> str:
-    """Raw API call. Use if dedicated tools fail."""
+async def call_domoticz_api(param: str, kwargs: dict, confirm: bool = False) -> str:
+    """Raw API call. Use if dedicated tools fail. Requires `confirm=True`."""
+    if not confirm:
+        return _confirmation_required("calling the raw Domoticz API")
     async with create_client() as client:
         response = await _do_request(client, "GET", _command_url(param, kwargs))
         return response.text
@@ -885,7 +1227,7 @@ async def call_domoticz_api(param: str, kwargs: dict) -> str:
 @mcp.tool()
 async def restart_system(confirm: bool = False) -> str:
     """Reboot server. Requires `confirm=True`."""
-    if not confirm: return _error_response("Confirmation required")
+    if not confirm: return _confirmation_required("restarting Domoticz")
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=system_reboot")
         return response.text
@@ -901,8 +1243,10 @@ async def rename_device(new_name: str, idx: int | None = None, old_name: str | N
         return response.text
 
 @mcp.tool()
-async def delete_device(idx: int | None = None, name: str | None = None) -> str:
-    """Hide device. Preferred: `idx`."""
+async def delete_device(idx: int | None = None, name: str | None = None, confirm: bool = False) -> str:
+    """Hide device. Preferred: `idx`. Requires `confirm=True`."""
+    if not confirm:
+        return _confirmation_required("hiding a device")
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
         if not resolved_idx: return _error_response("Device not found")
@@ -942,8 +1286,10 @@ async def send_notification(subject: str, body: str) -> str:
         return response.text
 
 @mcp.tool()
-async def set_security_status(secstatus: int, seccode: str) -> str:
-    """Arm panel. 0=Disarm, 1=Home, 2=Away. Cross-ref: `domoticz://security`."""
+async def set_security_status(secstatus: int, seccode: str, confirm: bool = False) -> str:
+    """Arm panel. 0=Disarm, 1=Home, 2=Away. Requires `confirm=True`. Cross-ref: `domoticz://security`."""
+    if not confirm:
+        return _confirmation_required("changing security panel status")
     async with create_client() as client:
         response = await _do_request(client, "GET", _command_url("setsecstatus", {"secstatus": secstatus, "seccode": seccode}))
         return response.text
@@ -986,7 +1332,7 @@ def summarize_home() -> str:
 @mcp.prompt()
 def energy_audit() -> str:
     """Usage analysis. Cross-ref: `domoticz://devices`."""
-    return "Audit energy using `domoticz://devices` Usage/CounterToday fields."
+    return "Audit energy using `domoticz://devices` for current readings and `get_daily_energy_history`, `get_weekly_energy_history`, or `get_monthly_energy_history` for counter trends."
 
 import argparse
 
@@ -1013,7 +1359,7 @@ def main():
         "transport": {"default": "stdio", "env_vars": ["DOMOTICZ_MCP_TRANSPORT", "TRANSPORT"]},
         "host": {"default": "127.0.0.1", "env_vars": ["DOMOTICZ_MCP_HOST", "HOST"]},
         "port": {"default": 8000, "type": int, "env_vars": ["DOMOTICZ_MCP_PORT", "PORT"]},
-        "domoticz_url": {"default": "https://xmpp.vanadrighem.eu/domoticz", "env_vars": ["DOMOTICZ_URL"]},
+        "domoticz_url": {"default": "http://127.0.0.1:8080", "env_vars": ["DOMOTICZ_URL"]},
         "domoticz_username": {"default": None, "env_vars": ["DOMOTICZ_USERNAME"]},
         "domoticz_password": {"default": None, "env_vars": ["DOMOTICZ_PASSWORD"]},
         "domoticz_client_id": {"default": None, "env_vars": ["DOMOTICZ_CLIENT_ID", "DOMOTICZ_CLIENTID"]},

@@ -15,20 +15,17 @@ A Model Context Protocol (MCP) server for integrating with the [Domoticz](https:
 The server exposes **Tools** (for active control and modifications), **Resources** (for read-only contextual awareness), and **Prompts** (for guided interaction templates).
 
 ### Tools (Actions)
-- **Search and Discovery:** Use `get_overview` for a high-level system summary and device counts. Use `search_devices` to find devices by name or current status using substring or regex matching.
-- **Maintenance:** Proactively identify sensors needing attention with `get_battery_levels` (low battery alerts) and `get_connectivity_report` (devices that haven't checked in). Use `get_system_health` for an overview of hardware gateway status. Check for system updates with `check_for_updates` and execute a system restart with `restart_system`.
-- **Energy Analytics:** Use `analyze_energy_usage` to summarize daily consumption across all power reporting devices and meters.
-- **Device Control:** Toggle switches, set states (On/Off), set dimmer levels (0-100), set thermostat temperatures (Celsius), control blinds, and manage RGB/color lighting (brightness, hue, color temperature). Supports lookup by `idx` or `name`.
-- **Device Management:** Create virtual sensors, rename devices, delete/hide devices, and manually update sensor values. Supports lookup by `idx` or `name`.
-- **Rooms and Scenes:** Control scenes/groups. Get room devices by `idx` or `room_name`.
-- **User Variables:** Read, add, update, and delete Domoticz user variables. Supports lookup by `idx` or `name`.
-- **History and Logs:** Access device history graphs and text/light logs by `idx` or `name`. Retrieve system logs and add custom log messages.
-- **System Information:** Get Domoticz instance version, global settings, hardware, sun times, users, and internal event scripts/rules.
-- **Security:** Get and set the Domoticz security panel status.
-- **Notifications:** Send notifications through the Domoticz notification subsystem.
-- **Event Management:** Get, create, update, and **search inside** internal event scripts (`search_scripts`). Supports Blockly, Lua, dzVents, and Python.
-- **Cameras and Floorplans:** Retrieve camera configurations and defined floorplans. Get a base64 encoded snapshot using `get_camera_snapshot`.
-- **Advanced:** Use `call_domoticz_api` to execute any generic Domoticz API endpoint directly.
+- **Search:** `search_devices_tool` searches devices by name or current data/status text. `search_scripts_tool` searches inside Domoticz event scripts.
+- **Energy History:** `get_daily_energy_history`, `get_weekly_energy_history`, and `get_monthly_energy_history` read counter graph history for energy, gas, and water meters by `idx` or `name`.
+- **Device Control:** `toggle_switch`, `set_switch_state`, `set_dimmer_level`, `set_temperature_setpoint`, `control_blinds`, `set_color_brightness`, and `set_color_temperature` control supported devices by `idx` or `name`.
+- **Device Management:** `rename_device`, `delete_device`, `create_virtual_sensor`, and `update_device_value` manage devices and virtual sensors.
+- **Scenes and Groups:** `switch_scene` activates configured scenes/groups by `idx` or `name`.
+- **User Variables:** `add_user_variable`, `update_user_variable`, and `delete_user_variable` manage Domoticz user variables.
+- **Event Scripts:** `create_event` and `update_event` create or update internal Domoticz event scripts.
+- **System Actions:** `restart_system`, `add_log_message`, `send_notification`, and `set_security_status` call Domoticz system, log, notification, and security APIs.
+- **Advanced:** `call_domoticz_api` executes a generic Domoticz command API call.
+
+High-impact tools require `confirm=True`: `call_domoticz_api`, `delete_device`, `delete_user_variable`, `update_event`, `restart_system`, and `set_security_status`.
 
 ### Resources (Context)
 - **`domoticz://dashboard`**: Read a curated view of favorite and currently active devices (lights on, sensors active).
@@ -50,18 +47,10 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **`domoticz://docs/blockly_syntax`**: Syntax rules for Blockly XML automations.
 
 ### Prompts (Templates)
-- **`agent_guidance`**: Provides the AI agent with critical knowledge about Domoticz-specific logic and best practices.
-- **`summarize_home`**: Instructs the AI to provide a human-readable summary of the home's current state using the dashboard resource.
-- **`maintenance_report`**: A comprehensive health check that audits batteries, checks device connectivity, and reviews system logs for errors.
-- **`audit_batteries`**: Specifically audits battery levels across all sensors to find those below a certain threshold.
-- **`energy_audit`**: Analyzes energy usage across the home to identify the biggest consumers today.
-- **`find_devices_by_state`**: Helps find all devices in a particular state (e.g., "show me everything that is open").
-- **`troubleshoot_device`**: A template that asks for a device `idx` or `name` and instructs the AI to read the device state and system logs to diagnose issues.
-- **`analyze_automations`**: Instructs the AI to review your internal event scripts for logic flaws or optimizations.
-- **`write_dzvents_script`**: Helps the AI write a dzVents script by providing syntax rules and device lookup instructions.
-- **`write_blockly_script`**: Helps the AI construct Blockly automations using proper XML representation.
-- **`system_update_check`**: Guides the AI to check for system updates and verify hardware gateway health.
-- **`dashboard_organization`**: Prompts the AI to analyze favorite devices and suggest room-based groupings.
+- **`agent_guidance`**: Orients an AI agent to start with `domoticz://overview`, prefer `idx`, and use health/log resources for troubleshooting.
+- **`summarize_home`**: Guides a concise home-state summary from `domoticz://dashboard`.
+- **`maintenance_report`**: Guides a health check using battery alerts, system health, and error logs.
+- **`energy_audit`**: Guides an energy review using `domoticz://devices` and the energy history tools.
 
 ## Performance and Efficiency
 
@@ -148,7 +137,7 @@ The server can be configured via environment variables, a `.env` file, or comman
 | `--transport` | `DOMOTICZ_MCP_TRANSPORT`, `TRANSPORT` | `stdio` | Transport to use (`stdio`, `sse`, or `streamable-http`) |
 | `--host` | `DOMOTICZ_MCP_HOST`, `HOST` | `127.0.0.1` | Host to bind to for SSE / HTTP |
 | `--port` | `DOMOTICZ_MCP_PORT`, `PORT` | `8000` | Port to bind to for SSE / HTTP |
-| `--domoticz-url` | `DOMOTICZ_URL` | `https://xmpp.vanadrighem.eu/domoticz` | Base URL of your Domoticz instance |
+| `--domoticz-url` | `DOMOTICZ_URL` | `http://127.0.0.1:8080` | Base URL of your Domoticz instance |
 | `--token-file` | `DOMOTICZ_MCP_TOKEN_FILE`, `TOKEN_FILE` | `~/.config/domoticz-mcp/token.json` | Path to OAuth token storage file |
 
 **Example `.env` file:**
