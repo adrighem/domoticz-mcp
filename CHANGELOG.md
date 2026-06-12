@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0](https://github.com/adrighem/domoticz-mcp/compare/v1.2.1...v1.3.0) (2026-06-12)
+
+
+### Features
+
+* improve energy monitoring and safety ([dab5e3d](https://github.com/adrighem/domoticz-mcp/commit/dab5e3dd1db737b0a62d684fbc28cea32ba6b1b8))
+
+
+### Bug Fixes
+
+* align documented resources and encode URLs ([94b335b](https://github.com/adrighem/domoticz-mcp/commit/94b335b7a389ce0b05d96ca25c227321ab1aeb42))
+
 ## [1.2.1](https://github.com/adrighem/domoticz-mcp/compare/v1.2.0...v1.2.1) (2026-06-11)
 
 
