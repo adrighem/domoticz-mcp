@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/adrighem/domoticz-mcp/compare/v1.3.0...v1.3.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* harden MCP contract and Domoticz state handling ([ca9df94](https://github.com/adrighem/domoticz-mcp/commit/ca9df94a4aa1aa2cecb9028b82f3a66288ca91ca))
+
 ## [1.3.0](https://github.com/adrighem/domoticz-mcp/compare/v1.2.1...v1.3.0) (2026-06-12)
 
 
