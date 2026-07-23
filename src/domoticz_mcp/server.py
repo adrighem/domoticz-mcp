@@ -1,16 +1,20 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "mcp",
+#     "mcp>=1.27,<2",
 #     "httpx",
+#     "pydantic>=2,<3",
 #     "python-dotenv",
 # ]
 # ///
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from dotenv import load_dotenv
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 import os
 import sys
 import json
@@ -25,7 +29,7 @@ import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, TYPE_CHECKING
+from typing import Annotated, Generic, Literal, NoReturn, Optional, Dict, Any, List, TYPE_CHECKING, TypeVar
 
 # Load environment variables from a .env file if it exists
 load_dotenv()
@@ -68,7 +72,15 @@ class InvalidParameterError(DomoticzError):
         self.message = message
 
 
-mcp = FastMCP("Domoticz", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), stateless_http=True)
+mcp = FastMCP(
+    "domoticz_mcp",
+    instructions=(
+        "Read domoticz://overview before operating the system. Prefer stable numeric "
+        "idx values for devices, scenes, and user variables. Event scripts use event IDs."
+    ),
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    stateless_http=True,
+)
 
 # Configuration defaults
 DOMOTICZ_BASE_URL = "http://127.0.0.1:8080"
@@ -84,10 +96,145 @@ _global_http_client: Optional[httpx.AsyncClient] = None
 
 # Cache settings
 CACHE_TTL = 300 # 5 minutes
-_device_cache = {"data": None, "timestamp": 0}
-_scene_cache = {"data": None, "timestamp": 0}
-_user_variable_cache = {"data": None, "timestamp": 0}
-_plans_cache = {"data": None, "timestamp": 0}
+_device_cache = {"data": None, "timestamp": 0, "generation": 0}
+_scene_cache = {"data": None, "timestamp": 0, "generation": 0}
+_user_variable_cache = {"data": None, "timestamp": 0, "generation": 0}
+_plans_cache = {"data": None, "timestamp": 0, "generation": 0}
+
+
+class DomoticzItem(BaseModel):
+    """A Domoticz object while preserving fields added by the upstream API."""
+
+    model_config = ConfigDict(extra="allow")
+
+    idx: int | str = Field(description="Numeric Domoticz device idx")
+    Name: str = Field(description="Configured device name")
+    Data: str | None = Field(default=None, description="Current human-readable device value")
+    Status: str | None = Field(default=None, description="Current switch-style status")
+    Type: str | None = Field(default=None, description="Domoticz device type")
+    SubType: str | None = Field(default=None, description="Domoticz device subtype")
+
+
+class ScriptSearchMatch(BaseModel):
+    """A matching Domoticz event script."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: int | str = Field(description="Canonical Domoticz event ID")
+    idx: int | str = Field(description="Compatibility alias for the event ID")
+    Name: str | None = Field(default=None, description="Event name")
+
+
+class DomoticzToolResult(BaseModel):
+    """A successful Domoticz command response."""
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str = Field(description="Status returned by Domoticz, normally OK")
+    title: str | None = Field(default=None, description="Optional Domoticz response title")
+
+
+ResultItem = TypeVar("ResultItem", bound=BaseModel)
+
+
+class PaginatedToolResult(BaseModel, Generic[ResultItem]):
+    """A page of MCP tool results with explicit continuation metadata."""
+
+    status: str = Field(description="Status returned by Domoticz, normally OK")
+    result: list[ResultItem] = Field(description="Results in this page")
+    total_count: int = Field(ge=0, description="Total number of matching results")
+    count: int = Field(ge=0, description="Number of results in this page")
+    offset: int = Field(ge=0, description="Zero-based offset of this page")
+    limit: int = Field(ge=1, description="Maximum results requested")
+    has_more: bool = Field(description="Whether another page is available")
+    next_offset: int | None = Field(
+        default=None,
+        ge=0,
+        description="Offset for the next page, or null when this is the final page",
+    )
+
+
+class EnergyHistorySummary(BaseModel):
+    """Aggregate statistics for normalized energy history."""
+
+    model_config = ConfigDict(extra="allow")
+
+    samples: int = Field(ge=0, description="Number of normalized history samples")
+    category: str = Field(description="Energy, gas, water, or storage category")
+    power: dict[str, float] | None = Field(default=None, description="Power aggregates in watts")
+    energy: dict[str, float] | None = Field(default=None, description="Energy aggregates in kilowatt-hours")
+    volume: dict[str, float] | None = Field(default=None, description="Volume aggregates in cubic metres")
+
+
+class EnergyHistorySample(BaseModel):
+    """A normalized Domoticz graph sample."""
+
+    model_config = ConfigDict(extra="allow")
+
+    d: str | None = Field(default=None, description="Domoticz sample date or timestamp")
+    numeric: dict[str, float] | None = Field(default=None, description="Numeric forms of upstream values")
+    power_w: float | None = Field(default=None, description="Normalized power in watts")
+    energy_kwh: float | None = Field(default=None, description="Normalized energy in kilowatt-hours")
+    volume_m3: float | None = Field(default=None, description="Normalized volume in cubic metres")
+
+
+class EnergyHistoryToolResult(DomoticzToolResult):
+    """Normalized energy, gas, or water history."""
+
+    period: Literal["day", "week", "month"] = Field(description="Requested history period")
+    range: str = Field(description="Domoticz graph range sent upstream")
+    idx: int = Field(ge=1, description="Resolved device idx")
+    Name: str | None = Field(default=None, description="Resolved device name")
+    include_instantaneous: bool = Field(description="Whether instantaneous samples were requested")
+    summary: EnergyHistorySummary = Field(description="Aggregate statistics for the returned samples")
+    result: list[EnergyHistorySample] = Field(description="Normalized history samples")
+
+
+EntityIdxArg = Annotated[
+    int | None,
+    Field(ge=1, description="Numeric Domoticz idx; preferred over name when known"),
+]
+EntityNameArg = Annotated[
+    str | None,
+    Field(min_length=1, max_length=200, description="Case-insensitive Domoticz entity name"),
+]
+OffsetArg = Annotated[
+    int,
+    Field(ge=0, description="Zero-based result offset"),
+]
+LimitArg = Annotated[
+    int,
+    Field(ge=1, le=100, description="Maximum number of results to return"),
+]
+ConfirmArg = Annotated[
+    bool,
+    Field(description="Explicitly confirm this high-impact operation"),
+]
+
+
+def _tool_annotations(
+    *,
+    read_only: bool,
+    destructive: bool | None = None,
+    idempotent: bool = True,
+) -> ToolAnnotations:
+    """Build complete MCP tool behavior hints."""
+    if destructive is None:
+        destructive = not read_only
+    return ToolAnnotations(
+        readOnlyHint=read_only,
+        destructiveHint=destructive,
+        idempotentHint=idempotent,
+        openWorldHint=True,
+    )
+
+
+def _invalidate_caches(*caches: Dict[str, Any]) -> None:
+    """Invalidate cached data and any in-flight reads of the old generation."""
+    for cache in caches:
+        cache["generation"] = cache.get("generation", 0) + 1
+        cache["data"] = None
+        cache["timestamp"] = 0
 
 
 def _format_response(data: Dict[str, Any]) -> str:
@@ -95,14 +242,82 @@ def _format_response(data: Dict[str, Any]) -> str:
     return json.dumps(data)
 
 
-def _error_response(message: str, status: str = "error") -> str:
-    """Format an error response as a JSON string."""
-    return json.dumps({"status": status, "message": message})
+def _error_response(message: str, status: str = "error") -> NoReturn:
+    """Raise a protocol-visible MCP tool error."""
+    raise ToolError(message)
 
 
-def _confirmation_required(action: str) -> str:
-    """Format a confirmation-required error response."""
-    return _error_response(f"Confirmation required for {action}. Retry with confirm=True.")
+def _confirmation_required(action: str) -> NoReturn:
+    """Raise a protocol-visible confirmation error."""
+    _error_response(f"Confirmation required for {action}. Retry with confirm=True.")
+
+
+def _domoticz_payload(response: httpx.Response, action: str) -> Dict[str, Any]:
+    """Parse and validate a JSON object returned by Domoticz."""
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ToolError(f"{action} failed: Domoticz returned invalid JSON.") from exc
+
+    if not isinstance(payload, dict):
+        raise ToolError(f"{action} failed: Domoticz returned an unexpected response.")
+
+    return _validated_success_payload(payload, action)
+
+
+def _validated_success_payload(payload: Dict[str, Any], action: str) -> Dict[str, Any]:
+    """Require a successful Domoticz status while allowing status-less reads."""
+    raw_status = payload.get("status")
+    status = "OK" if raw_status is None else str(raw_status)
+    if status.upper() not in {"OK", "SUCCESS"}:
+        detail = payload.get("message") or payload.get("title") or payload.get("error")
+        suffix = f": {detail}" if detail else f" with status {status}"
+        raise ToolError(f"{action} failed{suffix}.")
+
+    payload["status"] = status
+    return payload
+
+
+def _tool_result(response: httpx.Response, action: str) -> DomoticzToolResult:
+    """Convert a successful Domoticz response into structured MCP output."""
+    return DomoticzToolResult.model_validate(_domoticz_payload(response, action))
+
+
+async def _mutation_result(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    action: str,
+    caches: tuple[Dict[str, Any], ...],
+    **request_kwargs: Any,
+) -> DomoticzToolResult:
+    """Run a mutation and invalidate affected caches even if its outcome is ambiguous."""
+    try:
+        response = await _do_request(client, method, url, **request_kwargs)
+        return _tool_result(response, action)
+    finally:
+        _invalidate_caches(*caches)
+
+
+def _json_response_text(response: httpx.Response, action: str) -> str:
+    """Return validated Domoticz JSON for an MCP resource."""
+    return json.dumps(_domoticz_payload(response, action))
+
+
+def _structured_json_result(
+    response_text: str,
+    action: str,
+    model: type[ResultItem],
+) -> ResultItem:
+    """Convert an internal JSON response into a typed MCP result."""
+    try:
+        payload = json.loads(response_text)
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"{action} failed: internal response was invalid JSON.") from exc
+
+    if not isinstance(payload, dict):
+        raise ToolError(f"{action} failed: internal response was not an object.")
+    return model.model_validate(_validated_success_payload(payload, action))
 
 
 def _command_url(param: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -368,12 +583,26 @@ async def close_global_client() -> None:
         _global_http_client = None
 
 async def _get_cached_data(client: "httpx.AsyncClient", cache_obj: Dict[str, Any], api_url: str, key_path: str = "result") -> List[Dict[str, Any]]:
-    now = time.time()
-    if cache_obj["data"] is None or (now - cache_obj["timestamp"]) > CACHE_TTL:
+    while True:
+        now = time.time()
+        if cache_obj["data"] is not None and (now - cache_obj["timestamp"]) <= CACHE_TTL:
+            return cache_obj["data"]
+
+        generation = cache_obj.get("generation", 0)
         response = await _do_request(client, "GET", api_url)
-        cache_obj["data"] = response.json().get(key_path, [])
-        cache_obj["timestamp"] = now
-    return cache_obj["data"]
+        payload = _domoticz_payload(response, "Reading cached Domoticz data")
+        data = payload.get(key_path, [])
+        if not isinstance(data, list):
+            raise ToolError("Reading cached Domoticz data failed: result was not a list.")
+
+        # A mutation may have happened while this request was in flight. In that
+        # case the response can be stale, so discard it and fetch the new generation.
+        if generation != cache_obj.get("generation", 0):
+            continue
+
+        cache_obj["data"] = data
+        cache_obj["timestamp"] = time.time()
+        return data
 
 async def _resolve_idx(
     client: "httpx.AsyncClient",
@@ -417,9 +646,32 @@ def _simplify_device(dev: Dict[str, Any]) -> Dict[str, Any]:
     ]
     return {k: dev[k] for k in keys_to_keep if k in dev}
 
-def _paginate(data: list, offset: int, limit: int) -> list:
+def _paginate(data: list, offset: int, limit: int | None) -> list:
     """Paginate a list of results."""
+    if limit is None:
+        return data[offset:]
     return data[offset:offset + limit]
+
+
+def _paginated_payload(
+    data: list[Dict[str, Any]],
+    offset: int,
+    limit: int | None,
+) -> Dict[str, Any]:
+    """Return a page plus enough metadata for clients to continue."""
+    page = _paginate(data, offset, limit)
+    total_count = len(data)
+    has_more = offset + len(page) < total_count
+    return {
+        "status": "OK",
+        "result": page,
+        "total_count": total_count,
+        "count": len(page),
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": offset + len(page) if has_more else None,
+    }
 
 
 def _parse_number(value: Any) -> Optional[float]:
@@ -715,7 +967,7 @@ async def _get_energy_history(
             params["method"] = 1
 
         response = await _do_request(client, "GET", _command_url("graph", params))
-        data = response.json()
+        data = _domoticz_payload(response, "Reading energy history")
         records = [
             _normalize_energy_history_row(row, category)
             for row in data.get("result", [])
@@ -739,13 +991,13 @@ async def get_overview(detail_level: str = "minimal") -> str:
     """Internal: High-level overview."""
     async with create_client() as client:
         resp = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getversion")
-        sys_info = resp.json()
+        sys_info = _domoticz_payload(resp, "Reading Domoticz version")
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
         scenes = await _get_cached_data(client, _scene_cache, f"{DOMOTICZ_API_URL}?type=command&param=getscenes")
         vars = await _get_cached_data(client, _user_variable_cache, f"{DOMOTICZ_API_URL}?type=command&param=getuservariables")
         plans = await _get_cached_data(client, _plans_cache, f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true")
         hw_resp = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
-        hardware = hw_resp.json().get("result", [])
+        hardware = _domoticz_payload(hw_resp, "Reading hardware").get("result", [])
         overview = {
             "system": {"version": sys_info.get("version"), "build_time": sys_info.get("build_time"), "domoticz_url": DOMOTICZ_BASE_URL},
             "counts": {"devices": len(devices), "scenes_and_groups": len(scenes), "user_variables": len(vars), "rooms_plans": len(plans), "hardware_gateways": len(hardware)}
@@ -759,7 +1011,7 @@ async def get_system_health() -> str:
     """Internal: System health report."""
     async with create_client() as client:
         hw_resp = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
-        hardware = hw_resp.json().get("result", [])
+        hardware = _domoticz_payload(hw_resp, "Reading hardware health").get("result", [])
         health_report = [{"Name": hw.get("Name"), "Type": hw.get("Type"), "Status": "Online" if hw.get("Enabled") == "true" else "Disabled"} for hw in hardware]
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
         now = datetime.now()
@@ -772,11 +1024,11 @@ async def get_system_health() -> str:
                 except ValueError: pass
         return json.dumps({"status": "OK", "result": {"hardware_health": health_report, "unresponsive_devices_count": unresponsive_count}})
 
-async def get_all_devices(offset: int = 0, limit: int = 50) -> str:
+async def get_all_devices(offset: int = 0, limit: int | None = 50) -> str:
     """Internal: Get all devices."""
     async with create_client() as client:
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true&order=Name")
-        return json.dumps({"status": "OK", "result": _paginate(devices, offset, limit), "total_count": len(devices)})
+        return json.dumps(_paginated_payload(devices, offset, limit))
 
 async def get_device(idx: int | None = None, name: str | None = None) -> str:
     """Internal: Get specific device."""
@@ -784,7 +1036,7 @@ async def get_device(idx: int | None = None, name: str | None = None) -> str:
         resolved_idx = await _resolve_device_idx(client, idx, name)
         if not resolved_idx: return _error_response("Device not found")
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={resolved_idx}")
-        return response.text
+        return _json_response_text(response, "Reading device")
 
 async def get_scenes() -> str:
     """Internal: Get all scenes."""
@@ -823,7 +1075,7 @@ async def get_room_devices(idx: int | None = None, room_name: str | None = None)
                     break
         if idx is None: return _error_response("Room not found")
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getdevices&plan={idx}")
-        data = response.json()
+        data = _domoticz_payload(response, "Reading room devices")
         if "result" in data: data["result"] = [_simplify_device(d) for d in data["result"]]
         return json.dumps(data)
 
@@ -855,24 +1107,26 @@ async def get_battery_levels(threshold: int = 20) -> str:
         results.sort(key=lambda x: x["BatteryLevel"])
         return json.dumps({"status": "OK", "result": results})
 
-async def get_events(offset: int = 0, limit: int = 50) -> str:
+async def get_events(offset: int = 0, limit: int | None = 50) -> str:
     """Internal: Get event overview."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list")
-        events = response.json().get("result", [])
-        return json.dumps({"status": "OK", "result": _paginate(events, offset, limit), "total_count": len(events)})
+        events = _domoticz_payload(response, "Listing event scripts").get("result", [])
+        if not isinstance(events, list):
+            _error_response("Listing event scripts failed: result was not a list.")
+        return json.dumps(_paginated_payload(events, offset, limit))
 
 async def get_event(event_id: int) -> str:
     """Internal: Get specific event."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event={event_id}")
-        return response.text
+        return _json_response_text(response, f"Reading event script {event_id}")
 
 async def check_for_updates() -> str:
     """Internal: Check for updates."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=checkforupdate")
-        return response.text
+        return _json_response_text(response, "Checking for Domoticz updates")
 
 async def get_camera_snapshot(idx: int) -> str:
     """Internal: Get camera snapshot."""
@@ -884,13 +1138,13 @@ async def get_hardware() -> str:
     """Internal: Get hardware gateways."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
-        return response.text
+        return _json_response_text(response, "Reading hardware")
 
 async def get_settings() -> str:
     """Internal: Get settings."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getsettings")
-        return response.text
+        return _json_response_text(response, "Reading Domoticz settings")
 
 async def get_connectivity_report(hours: int = 24) -> str:
     """Internal: Get unresponsive devices."""
@@ -915,125 +1169,251 @@ async def analyze_energy_usage() -> str:
         results.sort(key=lambda item: item.get("current_power_w", 0), reverse=True)
         return json.dumps({"status": "OK", "summary": _summarize_energy(results), "result": results})
 
-async def search_scripts(query: str) -> str:
+async def search_scripts(query: str, offset: int = 0, limit: int | None = 50) -> str:
     """Internal: Search scripts."""
     async with create_client() as client:
         list_resp = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list")
-        scripts = list_resp.json().get("result", [])
+        scripts = _domoticz_payload(list_resp, "Listing event scripts").get("result", [])
+        if not isinstance(scripts, list):
+            _error_response("Listing event scripts failed: result was not a list.")
         matches = []
         for script in scripts:
-            load_resp = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event={script.get('idx')}")
-            script_data = load_resp.json().get("result", [{}])[0]
-            if query.lower() in (script_data.get("xml", "") or script_data.get("source", "")).lower():
-                matches.append({"idx": script.get("idx"), "Name": script.get("name")})
-        return json.dumps({"status": "OK", "result": matches})
+            event_id = script.get("id")
+            if event_id is None:
+                event_id = script.get("idx")
+            if event_id is None:
+                _error_response("Domoticz returned an event script without an id.")
 
-async def search_devices(query: str, offset: int = 0, limit: int = 50) -> str:
+            load_resp = await _do_request(
+                client,
+                "GET",
+                f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event={event_id}",
+            )
+            loaded = _domoticz_payload(load_resp, f"Loading event script {event_id}").get("result", [])
+            if not isinstance(loaded, list) or not loaded or not isinstance(loaded[0], dict):
+                _error_response(f"Domoticz returned invalid data for event script {event_id}.")
+            script_data = loaded[0]
+            source = (
+                script_data.get("xmlstatement")
+                or script_data.get("xml")
+                or script_data.get("source")
+                or ""
+            )
+            if query.lower() in str(source).lower():
+                matches.append({
+                    "id": event_id,
+                    "idx": event_id,
+                    "Name": script.get("name") or script.get("Name"),
+                })
+        return json.dumps(_paginated_payload(matches, offset, limit))
+
+async def search_devices(query: str, offset: int = 0, limit: int | None = 50) -> str:
     """Internal: Search devices."""
     async with create_client() as client:
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
         results = [d for d in devices if query.lower() in d.get("Name", "").lower() or query.lower() in d.get("Data", "").lower()]
-        return json.dumps({"status": "OK", "result": _paginate(results, offset, limit), "total_count": len(results)})
+        return json.dumps(_paginated_payload(results, offset, limit))
 
 # --- Resources ---
 
-@mcp.resource("domoticz://overview")
+@mcp.resource(
+    "domoticz://overview",
+    name="get_overview_resource",
+    title="Domoticz overview",
+    mime_type="application/json",
+)
 async def get_overview_resource() -> str:
     """Orientation: system version, hardware, and device counts."""
     return await get_overview()
 
-@mcp.resource("domoticz://health")
+@mcp.resource(
+    "domoticz://health",
+    name="get_system_health_resource",
+    title="Domoticz system health",
+    mime_type="application/json",
+)
 async def get_system_health_resource() -> str:
     """Troubleshooting: hardware health and unresponsive devices."""
     return await get_system_health()
 
-@mcp.resource("domoticz://devices")
+@mcp.resource(
+    "domoticz://devices",
+    name="get_all_devices_resource",
+    title="All Domoticz devices",
+    mime_type="application/json",
+)
 async def get_all_devices_resource() -> str:
     """Large output: state of all Domoticz devices."""
-    data = json.loads(await get_all_devices(limit=1000))
-    return json.dumps([_simplify_device(d) for d in data.get("result", [])])
+    data = json.loads(await get_all_devices(limit=None))
+    data["result"] = [_simplify_device(d) for d in data.get("result", [])]
+    return json.dumps(data)
 
-@mcp.resource("domoticz://device/{idx}")
+@mcp.resource(
+    "domoticz://device/{idx}",
+    name="get_device_resource",
+    title="Domoticz device by idx",
+    mime_type="application/json",
+)
 async def get_device_resource(idx: int) -> str:
     """Specific: metadata and current state for one device."""
     return await get_device(idx=idx)
 
-@mcp.resource("domoticz://device/{type}/{subtype}/{idx}")
+@mcp.resource(
+    "domoticz://device/{type}/{subtype}/{idx}",
+    name="get_device_by_type_resource",
+    title="Typed Domoticz device",
+    mime_type="application/json",
+)
 async def get_device_by_type_resource(type: str, subtype: str, idx: int) -> str:
     """Alias: typed device URI; type/subtype are descriptive, idx is authoritative."""
     return await get_device(idx=idx)
 
-@mcp.resource("domoticz://device/name/{name}")
+@mcp.resource(
+    "domoticz://device/name/{name}",
+    name="get_device_by_name_resource",
+    title="Domoticz device by name",
+    mime_type="application/json",
+)
 async def get_device_by_name_resource(name: str) -> str:
     """Specific: metadata and current state for one named device."""
     return await get_device(name=name)
 
-@mcp.resource("domoticz://scenes")
+@mcp.resource(
+    "domoticz://scenes",
+    name="get_scenes_resource",
+    title="Domoticz scenes and groups",
+    mime_type="application/json",
+)
 async def get_scenes_resource() -> str:
     """List: configured scenes and groups."""
     return await get_scenes()
 
-@mcp.resource("domoticz://scene/{idx}")
+@mcp.resource(
+    "domoticz://scene/{idx}",
+    name="get_scene_resource",
+    title="Domoticz scene by idx",
+    mime_type="application/json",
+)
 async def get_scene_resource(idx: int) -> str:
     """Specific: one configured scene or group."""
     return await get_scene(idx=idx)
 
-@mcp.resource("domoticz://scene/name/{name}")
+@mcp.resource(
+    "domoticz://scene/name/{name}",
+    name="get_scene_by_name_resource",
+    title="Domoticz scene by name",
+    mime_type="application/json",
+)
 async def get_scene_by_name_resource(name: str) -> str:
     """Specific: one named scene or group."""
     return await get_scene(name=name)
 
-@mcp.resource("domoticz://rooms")
+@mcp.resource(
+    "domoticz://rooms",
+    name="get_rooms_resource",
+    title="Domoticz rooms",
+    mime_type="application/json",
+)
 async def get_rooms_resource() -> str:
     """List: Room Plans (logical groupings)."""
     return await get_rooms()
 
-@mcp.resource("domoticz://room/{idx}")
+@mcp.resource(
+    "domoticz://room/{idx}",
+    name="get_room_resource",
+    title="Domoticz room by idx",
+    mime_type="application/json",
+)
 async def get_room_resource(idx: int) -> str:
     """Group: status of all devices in a room."""
     return await get_room_devices(idx=idx)
 
-@mcp.resource("domoticz://room/{room_name}/{idx}")
+@mcp.resource(
+    "domoticz://room/{room_name}/{idx}",
+    name="get_room_by_name_resource",
+    title="Named Domoticz room",
+    mime_type="application/json",
+)
 async def get_room_by_name_resource(room_name: str, idx: int) -> str:
     """Alias: named room URI; idx selects the room."""
     return await get_room_devices(idx=idx)
 
-@mcp.resource("domoticz://user-variables")
+@mcp.resource(
+    "domoticz://user-variables",
+    name="get_user_variables_resource",
+    title="Domoticz user variables",
+    mime_type="application/json",
+)
 async def get_user_variables_resource() -> str:
     """System: current values of user-defined variables."""
     return await get_user_variables()
 
-@mcp.resource("domoticz://user-variable/{idx}")
+@mcp.resource(
+    "domoticz://user-variable/{idx}",
+    name="get_user_variable_resource",
+    title="Domoticz user variable by idx",
+    mime_type="application/json",
+)
 async def get_user_variable_resource(idx: int) -> str:
     """Specific: one user-defined variable."""
     return await get_user_variable(idx=idx)
 
-@mcp.resource("domoticz://user-variable/name/{name}")
+@mcp.resource(
+    "domoticz://user-variable/name/{name}",
+    name="get_user_variable_by_name_resource",
+    title="Domoticz user variable by name",
+    mime_type="application/json",
+)
 async def get_user_variable_by_name_resource(name: str) -> str:
     """Specific: one named user-defined variable."""
     return await get_user_variable(name=name)
 
-@mcp.resource("domoticz://battery-alerts")
+@mcp.resource(
+    "domoticz://battery-alerts",
+    name="get_battery_levels_resource",
+    title="Domoticz battery alerts",
+    mime_type="application/json",
+)
 async def get_battery_levels_resource() -> str:
     """Maintenance: devices with <= 20% battery."""
     return await get_battery_levels(threshold=20)
 
-@mcp.resource("domoticz://events")
+@mcp.resource(
+    "domoticz://events",
+    name="get_events_resource",
+    title="Domoticz event scripts",
+    mime_type="application/json",
+)
 async def get_events_resource() -> str:
     """Overview: internal event system scripts."""
-    return await get_events()
+    return await get_events(limit=None)
 
-@mcp.resource("domoticz://event/{event_id}")
+@mcp.resource(
+    "domoticz://event/{event_id}",
+    name="get_event_resource",
+    title="Domoticz event script by ID",
+    mime_type="application/json",
+)
 async def get_event_resource(event_id: int) -> str:
     """Analysis: source code for an automation script."""
     return await get_event(event_id)
 
-@mcp.resource("domoticz://hardware")
+@mcp.resource(
+    "domoticz://hardware",
+    name="get_hardware_resource",
+    title="Domoticz hardware",
+    mime_type="application/json",
+)
 async def get_hardware_resource() -> str:
     """System: configured hardware gateways."""
     return await get_hardware()
 
-@mcp.resource("domoticz://dashboard")
+@mcp.resource(
+    "domoticz://dashboard",
+    name="get_dashboard_resource",
+    title="Domoticz dashboard",
+    mime_type="application/json",
+)
 async def get_dashboard_resource() -> str:
     """Curated: favorite and active devices status."""
     async with create_client() as client:
@@ -1041,276 +1421,660 @@ async def get_dashboard_resource() -> str:
         curated = [_simplify_device(d) for d in devices if d.get("Favorite") == 1 or (d.get("Status", "").lower() not in ["off", "closed", "normal", ""])]
         return json.dumps(curated)
 
-@mcp.resource("domoticz://logs")
+@mcp.resource(
+    "domoticz://logs",
+    name="get_log_resource",
+    title="Domoticz logs",
+    mime_type="application/json",
+)
 async def get_log_resource() -> str:
     """Debug: recent system logs."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime=0&loglevel=268435455")
-        return response.text
+        return _json_response_text(response, "Reading Domoticz logs")
 
-@mcp.resource("domoticz://log")
+@mcp.resource(
+    "domoticz://log",
+    name="get_log_alias_resource",
+    title="Domoticz log alias",
+    mime_type="application/json",
+)
 async def get_log_alias_resource() -> str:
     """Alias: recent system logs."""
     return await get_log_resource()
 
-@mcp.resource("domoticz://logs/error")
+@mcp.resource(
+    "domoticz://logs/error",
+    name="get_error_logs_resource",
+    title="Domoticz error logs",
+    mime_type="application/json",
+)
 async def get_error_logs_resource() -> str:
     """Debug: only 'Error' level log entries."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getlog&lastlogtime=0&loglevel=4")
-        return response.text
+        return _json_response_text(response, "Reading Domoticz error logs")
 
-@mcp.resource("domoticz://security")
+@mcp.resource(
+    "domoticz://security",
+    name="get_security_resource",
+    title="Domoticz security status",
+    mime_type="application/json",
+)
 async def get_security_resource() -> str:
     """Status: security panel arming state."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getsecstatus")
-        return response.text
+        return _json_response_text(response, "Reading security status")
 
-@mcp.resource("domoticz://settings")
+@mcp.resource(
+    "domoticz://settings",
+    name="get_settings_resource",
+    title="Domoticz settings",
+    mime_type="application/json",
+)
 async def get_settings_resource() -> str:
     """Config: global system settings."""
     return await get_settings()
 
-@mcp.resource("domoticz://docs/dzvents_syntax")
+@mcp.resource(
+    "domoticz://docs/dzvents_syntax",
+    name="get_dzvents_docs",
+    title="dzVents syntax guide",
+    mime_type="text/plain",
+)
 async def get_dzvents_docs() -> str:
     """Rules: dzVents automation syntax."""
     return "dzVents Syntax Cheat Sheet: return { on = { devices = { 'My Switch' } }, execute = function(domoticz, device) ... end }"
 
-@mcp.resource("domoticz://docs/blockly_syntax")
+@mcp.resource(
+    "domoticz://docs/blockly_syntax",
+    name="get_blockly_docs",
+    title="Domoticz Blockly syntax guide",
+    mime_type="text/plain",
+)
 async def get_blockly_docs() -> str:
     """Rules: Blockly XML representation."""
     return "Blockly in Domoticz uses an XML representation: <xml xmlns=\"...\"> ... </xml>"
 
 # --- Tools ---
 
-@mcp.tool()
-async def search_scripts_tool(query: str) -> str:
+@mcp.tool(
+    title="Search event scripts",
+    annotations=_tool_annotations(read_only=True),
+)
+async def search_scripts_tool(
+    query: Annotated[str, Field(min_length=1, max_length=200, description="Case-insensitive script source search term")],
+    offset: OffsetArg = 0,
+    limit: LimitArg = 50,
+) -> PaginatedToolResult[ScriptSearchMatch]:
     """Search string in scripts. Cross-ref: `domoticz://events`."""
-    return await search_scripts(query)
+    response = await search_scripts(query, offset, limit)
+    return _structured_json_result(
+        response,
+        "Searching event scripts",
+        PaginatedToolResult[ScriptSearchMatch],
+    )
 
-@mcp.tool()
-async def search_devices_tool(query: str, offset: int = 0, limit: int = 50) -> str:
+
+@mcp.tool(
+    title="Search devices",
+    annotations=_tool_annotations(read_only=True),
+)
+async def search_devices_tool(
+    query: Annotated[str, Field(min_length=1, max_length=200, description="Case-insensitive device name or data search term")],
+    offset: OffsetArg = 0,
+    limit: LimitArg = 50,
+) -> PaginatedToolResult[DomoticzItem]:
     """Search devices by name/status. Cross-ref: `domoticz://devices`."""
-    return await search_devices(query, offset, limit)
+    response = await search_devices(query, offset, limit)
+    return _structured_json_result(
+        response,
+        "Searching devices",
+        PaginatedToolResult[DomoticzItem],
+    )
 
-@mcp.tool()
-async def get_daily_energy_history(idx: int | None = None, name: str | None = None, include_instantaneous: bool = True) -> str:
+
+@mcp.tool(
+    title="Get daily energy history",
+    annotations=_tool_annotations(read_only=True),
+)
+async def get_daily_energy_history(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+    include_instantaneous: Annotated[bool, Field(description="Include instantaneous power samples")] = True,
+) -> EnergyHistoryToolResult:
     """Read today's counter history. Preferred: `idx`. Set `include_instantaneous=False` for daily totals."""
-    return await _get_energy_history("day", idx=idx, name=name, include_instantaneous=include_instantaneous)
+    response = await _get_energy_history("day", idx=idx, name=name, include_instantaneous=include_instantaneous)
+    return _structured_json_result(response, "Reading daily energy history", EnergyHistoryToolResult)
 
-@mcp.tool()
-async def get_weekly_energy_history(idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Get weekly energy history",
+    annotations=_tool_annotations(read_only=True),
+)
+async def get_weekly_energy_history(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> EnergyHistoryToolResult:
     """Read the last 7 days of counter history. Preferred: `idx`."""
-    return await _get_energy_history("week", idx=idx, name=name)
+    response = await _get_energy_history("week", idx=idx, name=name)
+    return _structured_json_result(response, "Reading weekly energy history", EnergyHistoryToolResult)
 
-@mcp.tool()
-async def get_monthly_energy_history(idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Get monthly energy history",
+    annotations=_tool_annotations(read_only=True),
+)
+async def get_monthly_energy_history(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> EnergyHistoryToolResult:
     """Read this month's counter history. Preferred: `idx`."""
-    return await _get_energy_history("month", idx=idx, name=name)
+    response = await _get_energy_history("month", idx=idx, name=name)
+    return _structured_json_result(response, "Reading monthly energy history", EnergyHistoryToolResult)
 
-@mcp.tool()
-async def toggle_switch(idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Toggle switch",
+    annotations=_tool_annotations(read_only=False, idempotent=False),
+)
+async def toggle_switch(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> DomoticzToolResult:
     """Toggle device. Preferred: `idx`. Cross-ref: `set_switch_state`."""
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd=Toggle")
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd=Toggle",
+            "Toggling switch",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def set_switch_state(state: str, idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Set switch state",
+    annotations=_tool_annotations(read_only=False),
+)
+async def set_switch_state(
+    state: Annotated[
+        str,
+        Field(
+            pattern=r"^([Oo][Nn]|[Oo][Ff][Ff])$",
+            description="Desired switch state: On or Off (case-insensitive)",
+        ),
+    ],
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> DomoticzToolResult:
     """Set 'On'/'Off'. Preferred: `idx`. Cross-ref: `toggle_switch`."""
-    if state.lower() not in ['on', 'off']: return _error_response("state must be 'On' or 'Off'")
+    if state.lower() not in ["on", "off"]:
+        _error_response("state must be 'On' or 'Off'")
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd={state.capitalize()}")
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd={state.capitalize()}",
+            "Setting switch state",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def set_dimmer_level(level: int, idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Set dimmer level",
+    annotations=_tool_annotations(read_only=False),
+)
+async def set_dimmer_level(
+    level: Annotated[int, Field(ge=0, le=100, description="Brightness percentage")],
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> DomoticzToolResult:
     """Set brightness (0-100). Preferred: `idx`. Cross-ref: `domoticz://device/{idx}`."""
-    if not (0 <= level <= 100): return _error_response("level must be 0-100")
+    if not 0 <= level <= 100:
+        _error_response("level must be 0-100")
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd=Set%20Level&level={level}")
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd=Set%20Level&level={level}",
+            "Setting dimmer level",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def set_temperature_setpoint(setpoint: float, idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Set temperature setpoint",
+    annotations=_tool_annotations(read_only=False),
+)
+async def set_temperature_setpoint(
+    setpoint: Annotated[float, Field(ge=-100, le=100, description="Target temperature in degrees Celsius")],
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> DomoticzToolResult:
     """Set target temp. Preferred: `idx`."""
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=setsetpoint&idx={resolved_idx}&setpoint={setpoint}")
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=setsetpoint&idx={resolved_idx}&setpoint={setpoint}",
+            "Setting temperature setpoint",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def control_blinds(command: str, idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Control blinds",
+    annotations=_tool_annotations(read_only=False),
+)
+async def control_blinds(
+    command: Annotated[
+        str,
+        Field(
+            pattern=r"^([Oo][Pp][Ee][Nn]|[Cc][Ll][Oo][Ss][Ee]|[Ss][Tt][Oo][Pp])$",
+            description="Blind movement command: Open, Close, or Stop (case-insensitive)",
+        ),
+    ],
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> DomoticzToolResult:
     """'Open'/'Close'/'Stop'. Preferred: `idx`."""
-    if command.capitalize() not in ['Open', 'Close', 'Stop']: return _error_response("Invalid command")
+    blind_command = command.capitalize()
+    if blind_command not in ["Open", "Close", "Stop"]:
+        _error_response("Invalid command")
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd={command.capitalize()}")
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd={blind_command}",
+            "Controlling blinds",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def switch_scene(command: str, idx: int | None = None, name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Switch scene",
+    annotations=_tool_annotations(read_only=False, idempotent=False),
+)
+async def switch_scene(
+    command: Annotated[
+        str,
+        Field(
+            pattern=r"^([Oo][Nn]|[Oo][Ff][Ff]|[Tt][Oo][Gg][Gg][Ll][Ee])$",
+            description="Scene or group command: On, Off, or Toggle (case-insensitive)",
+        ),
+    ],
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> DomoticzToolResult:
     """Activate scene. 'On'/'Off'/'Toggle'. Preferred: `idx`. Cross-ref: `domoticz://scenes`."""
     scene_command = command.capitalize()
     if scene_command not in ["On", "Off", "Toggle"]:
-        return _error_response("Invalid command")
+        _error_response("Invalid command")
     async with create_client() as client:
         resolved_idx = await _resolve_scene_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Scene not found")
-        response = await _do_request(client, "GET", _command_url("switchscene", {"idx": resolved_idx, "switchcmd": scene_command}))
-        return response.text
+        if not resolved_idx:
+            _error_response("Scene not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url("switchscene", {"idx": resolved_idx, "switchcmd": scene_command}),
+            "Switching scene",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def add_user_variable(name: str, vtype: int, value: str) -> str:
+
+@mcp.tool(
+    title="Add user variable",
+    annotations=_tool_annotations(read_only=False, destructive=False, idempotent=False),
+)
+async def add_user_variable(
+    name: Annotated[str, Field(min_length=1, max_length=200, description="New user variable name")],
+    vtype: Annotated[Literal[0, 1, 2, 3, 4], Field(description="Variable type: 0 integer, 1 float, 2 string, 3 date, 4 time")],
+    value: Annotated[str, Field(max_length=2000, description="Initial user variable value")],
+) -> DomoticzToolResult:
     """Add var. vtype: 0=Int, 1=Float, 2=Str, 3=Date, 4=Time. Cross-ref: `domoticz://user-variables`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", _command_url("adduservariable", {"vname": name, "vtype": vtype, "vvalue": value}))
-        _user_variable_cache["timestamp"] = 0
-        return response.text
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url("adduservariable", {"vname": name, "vtype": vtype, "vvalue": value}),
+            "Adding user variable",
+            (_user_variable_cache,),
+        )
 
-@mcp.tool()
-async def update_user_variable(name: str, vtype: int, value: str) -> str:
+
+@mcp.tool(
+    title="Update user variable",
+    annotations=_tool_annotations(read_only=False),
+)
+async def update_user_variable(
+    name: Annotated[str, Field(min_length=1, max_length=200, description="Existing user variable name")],
+    vtype: Annotated[Literal[0, 1, 2, 3, 4], Field(description="Variable type: 0 integer, 1 float, 2 string, 3 date, 4 time")],
+    value: Annotated[str, Field(max_length=2000, description="New user variable value")],
+) -> DomoticzToolResult:
     """Update var value. Cross-ref: `domoticz://user-variables`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", _command_url("updateuservariable", {"vname": name, "vtype": vtype, "vvalue": value}))
-        _user_variable_cache["timestamp"] = 0
-        return response.text
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url("updateuservariable", {"vname": name, "vtype": vtype, "vvalue": value}),
+            "Updating user variable",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def delete_user_variable(idx: int | None = None, name: str | None = None, confirm: bool = False) -> str:
+
+@mcp.tool(
+    title="Delete user variable",
+    annotations=_tool_annotations(read_only=False, destructive=True),
+)
+async def delete_user_variable(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+    confirm: ConfirmArg = False,
+) -> DomoticzToolResult:
     """Delete var. Preferred: `idx`. Requires `confirm=True`."""
     if not confirm:
-        return _confirmation_required("deleting a user variable")
+        _confirmation_required("deleting a user variable")
     async with create_client() as client:
         resolved_idx = await _resolve_user_variable_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Var not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=deleteuservariable&idx={resolved_idx}")
-        _user_variable_cache["timestamp"] = 0
-        return response.text
+        if not resolved_idx:
+            _error_response("User variable not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=deleteuservariable&idx={resolved_idx}",
+            "Deleting user variable",
+            (_user_variable_cache,),
+        )
 
-@mcp.tool()
-async def create_event(name: str, interpreter: str, event_type: str, xmlstatement: str, eventstatus: str = "1") -> str:
+
+@mcp.tool(
+    title="Create event script",
+    annotations=_tool_annotations(read_only=False, destructive=False, idempotent=False),
+)
+async def create_event(
+    name: Annotated[str, Field(min_length=1, max_length=200, description="New event script name")],
+    interpreter: Annotated[str, Field(min_length=1, max_length=50, description="Domoticz event interpreter")],
+    event_type: Annotated[str, Field(min_length=1, max_length=50, description="Domoticz event type")],
+    xmlstatement: Annotated[str, Field(min_length=1, max_length=1_000_000, description="Event source or Blockly XML")],
+    eventstatus: Annotated[Literal["0", "1"], Field(description="1 to enable the event, 0 to disable it")] = "1",
+) -> DomoticzToolResult:
     """Create script. Cross-ref: `domoticz://docs/dzvents_syntax`."""
     async with create_client() as client:
         data = {"evparam": "create", "name": name, "eventstatus": eventstatus, "interpreter": interpreter, "xml": xmlstatement, "eventtype": event_type, "logicarray": ""}
         response = await _do_request(client, "POST", f"{DOMOTICZ_API_URL}?type=command&param=events", data=data)
-        return response.text
+        return _tool_result(response, "Creating event script")
 
-@mcp.tool()
-async def update_event(event_id: int, name: str, interpreter: str, event_type: str, xmlstatement: str, eventstatus: str = "1", confirm: bool = False) -> str:
+
+@mcp.tool(
+    title="Update event script",
+    annotations=_tool_annotations(read_only=False, destructive=True),
+)
+async def update_event(
+    event_id: Annotated[int, Field(ge=1, description="Canonical Domoticz event ID")],
+    name: Annotated[str, Field(min_length=1, max_length=200, description="Event script name")],
+    interpreter: Annotated[str, Field(min_length=1, max_length=50, description="Domoticz event interpreter")],
+    event_type: Annotated[str, Field(min_length=1, max_length=50, description="Domoticz event type")],
+    xmlstatement: Annotated[str, Field(min_length=1, max_length=1_000_000, description="Replacement event source or Blockly XML")],
+    eventstatus: Annotated[Literal["0", "1"], Field(description="1 to enable the event, 0 to disable it")] = "1",
+    confirm: ConfirmArg = False,
+) -> DomoticzToolResult:
     """Update script. Cross-ref: `domoticz://event/{event_id}`. Requires `confirm=True`."""
     if not confirm:
-        return _confirmation_required("updating an event script")
+        _confirmation_required("updating an event script")
     async with create_client() as client:
         data = {"evparam": "create", "eventid": str(event_id), "name": name, "eventstatus": eventstatus, "interpreter": interpreter, "xml": xmlstatement, "eventtype": event_type, "logicarray": ""}
         response = await _do_request(client, "POST", f"{DOMOTICZ_API_URL}?type=command&param=events", data=data)
-        return response.text
+        return _tool_result(response, "Updating event script")
 
-@mcp.tool()
-async def call_domoticz_api(param: str, kwargs: dict, confirm: bool = False) -> str:
+
+@mcp.tool(
+    title="Call raw Domoticz API",
+    annotations=_tool_annotations(read_only=False, destructive=True, idempotent=False),
+)
+async def call_domoticz_api(
+    param: Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_]+$", description="Domoticz command parameter")],
+    kwargs: Annotated[dict[str, str | int | float | bool], Field(description="Additional Domoticz query parameters")],
+    confirm: ConfirmArg = False,
+) -> DomoticzToolResult:
     """Raw API call. Use if dedicated tools fail. Requires `confirm=True`."""
     if not confirm:
-        return _confirmation_required("calling the raw Domoticz API")
+        _confirmation_required("calling the raw Domoticz API")
     async with create_client() as client:
-        response = await _do_request(client, "GET", _command_url(param, kwargs))
-        return response.text
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url(param, kwargs),
+            "Calling raw Domoticz API",
+            (_device_cache, _scene_cache, _user_variable_cache, _plans_cache),
+        )
 
-@mcp.tool()
-async def restart_system(confirm: bool = False) -> str:
+
+@mcp.tool(
+    title="Restart Domoticz",
+    annotations=_tool_annotations(read_only=False, destructive=True, idempotent=False),
+)
+async def restart_system(
+    confirm: ConfirmArg = False,
+) -> DomoticzToolResult:
     """Reboot server. Requires `confirm=True`."""
-    if not confirm: return _confirmation_required("restarting Domoticz")
+    if not confirm:
+        _confirmation_required("restarting Domoticz")
     async with create_client() as client:
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=system_reboot")
-        return response.text
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=system_reboot",
+            "Restarting Domoticz",
+            (_device_cache, _scene_cache, _user_variable_cache, _plans_cache),
+        )
 
-@mcp.tool()
-async def rename_device(new_name: str, idx: int | None = None, old_name: str | None = None) -> str:
+
+@mcp.tool(
+    title="Rename device",
+    annotations=_tool_annotations(read_only=False),
+)
+async def rename_device(
+    new_name: Annotated[str, Field(min_length=1, max_length=200, description="New device name")],
+    idx: EntityIdxArg = None,
+    old_name: Annotated[str | None, Field(min_length=1, max_length=200, description="Current device name, used when idx is omitted")] = None,
+) -> DomoticzToolResult:
     """Rename device. Preferred: `idx`."""
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, old_name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", _command_url("renamedevice", {"name": new_name, "idx": resolved_idx}))
-        _device_cache["timestamp"] = 0
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url("renamedevice", {"name": new_name, "idx": resolved_idx}),
+            "Renaming device",
+            (_device_cache,),
+        )
 
-@mcp.tool()
-async def delete_device(idx: int | None = None, name: str | None = None, confirm: bool = False) -> str:
+
+@mcp.tool(
+    title="Hide device",
+    annotations=_tool_annotations(read_only=False, destructive=True),
+)
+async def delete_device(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+    confirm: ConfirmArg = False,
+) -> DomoticzToolResult:
     """Hide device. Preferred: `idx`. Requires `confirm=True`."""
     if not confirm:
-        return _confirmation_required("hiding a device")
+        _confirmation_required("hiding a device")
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=setused&used=false&idx={resolved_idx}")
-        _device_cache["timestamp"] = 0
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=setused&used=false&idx={resolved_idx}",
+            "Hiding device",
+            (_device_cache,),
+        )
 
-@mcp.tool()
-async def create_virtual_sensor(hw_idx: int, sensorname: str, sensortype: int) -> str:
+
+@mcp.tool(
+    title="Create virtual sensor",
+    annotations=_tool_annotations(read_only=False, destructive=False, idempotent=False),
+)
+async def create_virtual_sensor(
+    hw_idx: Annotated[int, Field(ge=1, description="Hardware idx that owns the new sensor")],
+    sensorname: Annotated[str, Field(min_length=1, max_length=200, description="New virtual sensor name")],
+    sensortype: Annotated[int, Field(ge=1, description="Domoticz virtual sensor type number")],
+) -> DomoticzToolResult:
     """Create dummy. Cross-ref: `domoticz://hardware`."""
     async with create_client() as client:
-        response = await _do_request(client, "GET", _command_url("createvirtualsensor", {"idx": hw_idx, "sensorname": sensorname, "sensortype": sensortype}))
-        _device_cache["timestamp"] = 0
-        return response.text
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url("createvirtualsensor", {"idx": hw_idx, "sensorname": sensorname, "sensortype": sensortype}),
+            "Creating virtual sensor",
+            (_device_cache,),
+        )
 
-@mcp.tool()
-async def update_device_value(idx: int | None = None, name: str | None = None, nvalue: int = 0, svalue: str = "") -> str:
+
+@mcp.tool(
+    title="Update device value",
+    annotations=_tool_annotations(read_only=False),
+)
+async def update_device_value(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+    nvalue: Annotated[int, Field(description="Numeric Domoticz device value")] = 0,
+    svalue: Annotated[str, Field(max_length=10_000, description="String Domoticz device value")] = "",
+) -> DomoticzToolResult:
     """Manual update. Preferred: `idx`."""
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", _command_url("udevice", {"idx": resolved_idx, "nvalue": nvalue, "svalue": svalue}))
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url("udevice", {"idx": resolved_idx, "nvalue": nvalue, "svalue": svalue}),
+            "Updating device value",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def add_log_message(message: str, level: int = 2) -> str:
+
+@mcp.tool(
+    title="Add Domoticz log message",
+    annotations=_tool_annotations(read_only=False, destructive=False, idempotent=False),
+)
+async def add_log_message(
+    message: Annotated[str, Field(min_length=1, max_length=10_000, description="Message to add to the Domoticz log")],
+    level: Annotated[Literal[1, 2, 4], Field(description="Log level: 1 normal, 2 status, 4 error")] = 2,
+) -> DomoticzToolResult:
     """Log message. level: 1=Normal, 2=Status, 4=Error. Cross-ref: `domoticz://logs`."""
     async with create_client() as client:
         response = await _do_request(client, "GET", _command_url("addlogmessage", {"message": message, "level": level}))
-        return response.text
+        return _tool_result(response, "Adding log message")
 
-@mcp.tool()
-async def send_notification(subject: str, body: str) -> str:
+
+@mcp.tool(
+    title="Send notification",
+    annotations=_tool_annotations(read_only=False, destructive=False, idempotent=False),
+)
+async def send_notification(
+    subject: Annotated[str, Field(min_length=1, max_length=500, description="Notification subject")],
+    body: Annotated[str, Field(max_length=10_000, description="Notification body")],
+) -> DomoticzToolResult:
     """Send notification."""
     async with create_client() as client:
         response = await _do_request(client, "GET", _command_url("sendnotification", {"subject": subject, "body": body}))
-        return response.text
+        return _tool_result(response, "Sending notification")
 
-@mcp.tool()
-async def set_security_status(secstatus: int, seccode: str, confirm: bool = False) -> str:
+
+@mcp.tool(
+    title="Set security status",
+    annotations=_tool_annotations(read_only=False, destructive=True),
+)
+async def set_security_status(
+    secstatus: Annotated[Literal[0, 1, 2], Field(description="Security state: 0 disarmed, 1 armed home, 2 armed away")],
+    seccode: Annotated[str, Field(min_length=1, max_length=100, description="Domoticz security panel code")],
+    confirm: ConfirmArg = False,
+) -> DomoticzToolResult:
     """Arm panel. 0=Disarm, 1=Home, 2=Away. Requires `confirm=True`. Cross-ref: `domoticz://security`."""
     if not confirm:
-        return _confirmation_required("changing security panel status")
+        _confirmation_required("changing security panel status")
     async with create_client() as client:
-        response = await _do_request(client, "GET", _command_url("setsecstatus", {"secstatus": secstatus, "seccode": seccode}))
-        return response.text
+        return await _mutation_result(
+            client,
+            "GET",
+            _command_url("setsecstatus", {"secstatus": secstatus, "seccode": seccode}),
+            "Changing security panel status",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def set_color_brightness(hue: int, brightness: int, idx: int | None = None, name: str | None = None, iswhite: bool = False) -> str:
+
+@mcp.tool(
+    title="Set color and brightness",
+    annotations=_tool_annotations(read_only=False),
+)
+async def set_color_brightness(
+    hue: Annotated[int, Field(ge=0, le=360, description="Hue in degrees")],
+    brightness: Annotated[int, Field(ge=0, le=100, description="Brightness percentage")],
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+    iswhite: Annotated[bool, Field(description="Use white-light mode instead of RGB mode")] = False,
+) -> DomoticzToolResult:
     """Set RGB. Preferred: `idx`."""
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=setcolbrightnessvalue&idx={resolved_idx}&hue={hue}&brightness={brightness}&iswhite={str(iswhite).lower()}")
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=setcolbrightnessvalue&idx={resolved_idx}&hue={hue}&brightness={brightness}&iswhite={str(iswhite).lower()}",
+            "Setting color and brightness",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
-@mcp.tool()
-async def set_color_temperature(kelvin: int, idx: int | None = None, name: str | None = None) -> str:
-    """Set white temp. Preferred: `idx`."""
+
+@mcp.tool(
+    title="Set color temperature",
+    annotations=_tool_annotations(read_only=False),
+)
+async def set_color_temperature(
+    kelvin: Annotated[int, Field(ge=0, le=100, description="Domoticz normalized white-temperature level")],
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> DomoticzToolResult:
+    """Set normalized white temperature (0-100). Preferred: `idx`."""
     async with create_client() as client:
         resolved_idx = await _resolve_device_idx(client, idx, name)
-        if not resolved_idx: return _error_response("Device not found")
-        response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=setkelvinlevel&idx={resolved_idx}&kelvin={kelvin}")
-        return response.text
+        if not resolved_idx:
+            _error_response("Device not found")
+        return await _mutation_result(
+            client,
+            "GET",
+            f"{DOMOTICZ_API_URL}?type=command&param=setkelvinlevel&idx={resolved_idx}&kelvin={kelvin}",
+            "Setting color temperature",
+            (_device_cache, _scene_cache, _user_variable_cache),
+        )
 
 # --- Prompts ---
 

@@ -5,6 +5,7 @@ from httpx import Response
 import json
 import asyncio
 from datetime import datetime, timedelta
+from mcp.server.fastmcp.exceptions import ToolError
 import domoticz_mcp.server as server_module
 import domoticz_mcp.server as server
 from domoticz_mcp.server import (
@@ -24,12 +25,16 @@ def setup_function():
     # Reset caches before each test
     _device_cache["data"] = None
     _device_cache["timestamp"] = 0
+    _device_cache["generation"] = 0
     _scene_cache["data"] = None
     _scene_cache["timestamp"] = 0
+    _scene_cache["generation"] = 0
     _user_variable_cache["data"] = None
     _user_variable_cache["timestamp"] = 0
+    _user_variable_cache["generation"] = 0
     _plans_cache["data"] = None
     _plans_cache["timestamp"] = 0
+    _plans_cache["generation"] = 0
 
 # Mock response for getdevices to test name resolution
 DEVICES_MOCK_RESPONSE = {
@@ -86,7 +91,9 @@ async def test_get_device_by_name():
     )
     
     response = await get_device(name="Kitchen Light")
-    assert json.loads(response) == device_data
+    data = json.loads(response)
+    assert data["status"] == "OK"
+    assert data["result"] == device_data["result"]
 
 @pytest.mark.asyncio
 @respx.mock
@@ -96,7 +103,7 @@ async def test_toggle_switch_by_idx():
     )
     
     response = await toggle_switch(idx=5)
-    assert json.loads(response) == {"status": "OK"}
+    assert response.status == "OK"
 
 @pytest.mark.asyncio
 @respx.mock
@@ -112,7 +119,9 @@ async def test_get_room_devices_by_name():
     )
     
     response = await get_room_devices(room_name="Living Room")
-    assert json.loads(response) == room_devices
+    data = json.loads(response)
+    assert data["status"] == "OK"
+    assert data["result"] == room_devices["result"]
 
 @pytest.mark.asyncio
 @respx.mock
@@ -223,8 +232,8 @@ async def test_user_variable_tools():
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=deleteuservariable&idx=5").mock(
         return_value=Response(200, json={"status": "OK"})
     )
-    response = await delete_user_variable(name="DeleteMe")
-    assert "Confirmation required" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="Confirmation required"):
+        await delete_user_variable(name="DeleteMe")
     await delete_user_variable(name="DeleteMe", confirm=True)
 
 @pytest.mark.asyncio
@@ -339,7 +348,7 @@ async def test_energy_history_tools(monkeypatch):
             ],
         })
     )
-    daily = json.loads(await get_daily_energy_history(idx=1))
+    daily = (await get_daily_energy_history(idx=1)).model_dump()
     assert daily["include_instantaneous"] is True
     assert daily["summary"]["power"]["max_w"] == 200
     assert daily["summary"]["power"]["avg_w"] == 150
@@ -354,7 +363,7 @@ async def test_energy_history_tools(monkeypatch):
             ],
         })
     )
-    weekly = json.loads(await get_weekly_energy_history(name="Smart Meter"))
+    weekly = (await get_weekly_energy_history(name="Smart Meter")).model_dump()
     assert weekly["range"] == "2026-06-06T2026-06-12"
     assert weekly["summary"]["energy"]["total_kwh"] == 5.5
 
@@ -368,7 +377,7 @@ async def test_energy_history_tools(monkeypatch):
             ],
         })
     )
-    monthly = json.loads(await get_monthly_energy_history(idx=2))
+    monthly = (await get_monthly_energy_history(idx=2)).model_dump()
     assert monthly["summary"]["category"] == "gas"
     assert monthly["summary"]["volume"]["total_m3"] == 1.0
 
@@ -449,8 +458,8 @@ async def test_scene_and_room_tools():
         return_value=Response(200, json={"status": "OK"})
     )
     await switch_scene("On", idx=1)
-    response = await switch_scene("Invalid", idx=1)
-    assert "Invalid command" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="Invalid command"):
+        await switch_scene("Invalid", idx=1)
     
     # get_rooms
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true").mock(
@@ -558,19 +567,19 @@ async def test_error_cases():
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
         return_value=Response(200, json={"result": []})
     )
-    response = await get_device(name="Missing")
-    assert "Device not found" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="Device not found"):
+        await get_device(name="Missing")
     
     # Invalid switch state
     from domoticz_mcp.server import set_switch_state
-    response = await set_switch_state("Invalid", idx=1)
-    assert "state must be 'On' or 'Off'" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="state must be 'On' or 'Off'"):
+        await set_switch_state("Invalid", idx=1)
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_missing_params():
-    response = await toggle_switch()
-    assert "Device not found" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="Device not found"):
+        await toggle_switch()
 
 def test_dns_rebinding_protection_disabled():
     from mcp.server.fastmcp import FastMCP
@@ -666,16 +675,22 @@ async def test_get_system_health():
 @respx.mock
 async def test_search_scripts():
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=list").mock(
-        return_value=Response(200, json={"result": [{"idx": "10", "name": "AutoLight", "interpreter": "python"}]})
+        return_value=Response(200, json={
+            "result": [{"id": "10", "idx": "999", "name": "AutoLight", "interpreter": "python"}],
+        })
     )
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=events&evparam=load&event=10").mock(
-        return_value=Response(200, json={"result": [{"source": "if light_level < 50: turn_on()"}]})
+        return_value=Response(200, json={"result": [{"xmlstatement": "if light_level < 50: turn_on()"}]})
     )
     
     response = await search_scripts(query="light_level")
     data = json.loads(response)
     assert len(data["result"]) == 1
+    assert data["result"][0]["id"] == "10"
+    assert data["result"][0]["idx"] == "10"
     assert data["result"][0]["Name"] == "AutoLight"
+    assert data["count"] == 1
+    assert data["has_more"] is False
 
 @pytest.mark.asyncio
 @respx.mock
@@ -811,10 +826,8 @@ async def test_resolve_idx_shared():
 
 def test_error_response_helper():
     from domoticz_mcp.server import _error_response
-    resp = _error_response("Test error")
-    data = json.loads(resp)
-    assert data["status"] == "error"
-    assert data["message"] == "Test error"
+    with pytest.raises(ToolError, match="Test error"):
+        _error_response("Test error")
 
 def test_format_response_helper():
     from domoticz_mcp.server import _format_response
@@ -849,10 +862,10 @@ async def test_new_tools():
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=testparam&myarg=1").mock(
         return_value=Response(200, json={"status": "OK"})
     )
-    response_fail = await call_domoticz_api("testparam", {"myarg": "1"})
-    assert "Confirmation required" in json.loads(response_fail)["message"]
+    with pytest.raises(ToolError, match="Confirmation required"):
+        await call_domoticz_api("testparam", {"myarg": "1"})
     response = await call_domoticz_api("testparam", {"myarg": "1"}, confirm=True)
-    assert json.loads(response)["status"] == "OK"
+    assert response.status == "OK"
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=checkforupdate").mock(
         return_value=Response(200, json={"status": "OK", "HaveUpdate": False})
     )
@@ -861,10 +874,10 @@ async def test_new_tools():
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=system_reboot").mock(
         return_value=Response(200, json={"status": "OK"})
     )
-    response_fail = await restart_system(confirm=False)
-    assert "error" in json.loads(response_fail)["status"]
+    with pytest.raises(ToolError, match="Confirmation required"):
+        await restart_system(confirm=False)
     response_ok = await restart_system(confirm=True)
-    assert json.loads(response_ok)["status"] == "OK"
+    assert response_ok.status == "OK"
     respx.get(f"{DOMOTICZ_BASE_URL}/camsnapshot.jpg?idx=1").mock(
         return_value=Response(200, content=b"fakeimage")
     )
@@ -876,32 +889,32 @@ async def test_new_tools():
 async def test_high_impact_tools_require_confirmation():
     from domoticz_mcp.server import delete_device, set_security_status, update_event
 
-    response = await set_security_status(1, "1234")
-    assert "Confirmation required" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="Confirmation required"):
+        await set_security_status(1, "1234")
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=setsecstatus&secstatus=1&seccode=1234").mock(
         return_value=Response(200, json={"status": "OK"})
     )
     response = await set_security_status(1, "1234", confirm=True)
-    assert json.loads(response)["status"] == "OK"
+    assert response.status == "OK"
 
-    response = await update_event(10, "AutoLight", "python", "device", "print('on')")
-    assert "Confirmation required" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="Confirmation required"):
+        await update_event(10, "AutoLight", "python", "device", "print('on')")
     respx.post(f"{DOMOTICZ_API_URL}?type=command&param=events").mock(
         return_value=Response(200, json={"status": "OK"})
     )
     response = await update_event(10, "AutoLight", "python", "device", "print('on')", confirm=True)
-    assert json.loads(response)["status"] == "OK"
+    assert response.status == "OK"
 
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
         return_value=Response(200, json=DEVICES_MOCK_RESPONSE)
     )
-    response = await delete_device(name="Kitchen Light")
-    assert "Confirmation required" in json.loads(response)["message"]
+    with pytest.raises(ToolError, match="Confirmation required"):
+        await delete_device(name="Kitchen Light")
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=setused&used=false&idx=2").mock(
         return_value=Response(200, json={"status": "OK"})
     )
     response = await delete_device(name="Kitchen Light", confirm=True)
-    assert json.loads(response)["status"] == "OK"
+    assert response.status == "OK"
 
 @pytest.mark.asyncio
 @respx.mock

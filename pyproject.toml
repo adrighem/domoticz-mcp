@@ -13,8 +13,9 @@ authors = [
     {name = "Vincent"}
 ]
 dependencies = [
-    "mcp",
+    "mcp>=1.27,<2",
     "httpx",
+    "pydantic>=2,<3",
     "uvicorn",
     "starlette",
     "python-dotenv",
