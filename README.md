@@ -16,6 +16,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ### Tools (Actions)
 - **Search:** `search_devices_tool` searches devices by name or current data/status text. `search_scripts_tool` searches inside Domoticz event scripts.
+- **Authentication:** `start_oauth_login` starts a short-lived browser login and returns its authorization URL. `get_oauth_login_status` reports when the login is complete.
 - **Energy History:** `get_daily_energy_history`, `get_weekly_energy_history`, and `get_monthly_energy_history` read counter graph history for energy, gas, and water meters by `idx` or `name`.
 - **Device Control:** `toggle_switch`, `set_switch_state`, `set_dimmer_level`, `set_temperature_setpoint`, `control_blinds`, `set_color_brightness`, and `set_color_temperature` control supported devices by `idx` or `name`.
 - **Device Management:** `rename_device`, `delete_device`, `create_virtual_sensor`, and `update_device_value` manage devices and virtual sensors.
@@ -55,7 +56,8 @@ High-impact tools require `confirm=True`: `call_domoticz_api`, `delete_device`, 
 ## Performance and Efficiency
 
 - **Caching:** The server implements a 5-minute TTL cache for devices, scenes, user variables, and rooms to significantly reduce API latency and Domoticz load.
-- **HTTP Lifecycle:** Uses `httpx.AsyncClient` with consistent timeout, authentication setup, and explicit close handling for owned clients.
+- **HTTP Lifecycle:** Reuses a shared `httpx.AsyncClient`, applies consistent timeouts, and closes it through the MCP server lifespan.
+- **Bounded Authentication:** MCP requests fail fast with actionable guidance when OAuth needs attention; browser authentication only runs when explicitly requested.
 
 ## Architecture
 
@@ -175,7 +177,24 @@ This approach uses an OAuth2 token and is generally more secure.
 3. Note the generated **Client ID** and **Client Secret**.
 
 **Interactive Flow (Desktop/CLI):**
-When the server runs for the first time natively on your machine, it will print an authorization URL to the console/stderr and attempt to open your browser. After you approve the request, it will save the token to the `token-file` for future use.
+Run the explicit authentication command in an interactive terminal:
+
+```bash
+domoticz-mcp --authenticate
+```
+
+The command opens the authorization URL and waits up to two minutes for the browser callback. After approval, it stores the token with owner-only file permissions and starts the MCP server. Normal MCP requests never launch a browser; if refresh fails, they return an actionable authentication error instead of waiting indefinitely.
+
+**Interactive Flow from Codex or another MCP client:**
+
+1. Call `start_oauth_login`.
+2. Open the returned `authorization_url` in your regular browser.
+3. Call `get_oauth_login_status` with the returned `flow_id` until its status is `complete`.
+4. Retry the original Domoticz operation.
+
+The start tool returns immediately and reuses an existing pending flow, so authentication does not consume the MCP tool timeout. The callback listener binds only to `127.0.0.1`, expires after two minutes, validates OAuth state and PKCE, and never returns tokens or authorization codes through MCP.
+
+This tool flow is intended for a local MCP server such as Codex STDIO. The browser must be able to reach the callback on the MCP host; remote containers and remote execution hosts require an explicitly routed callback or the command-line authentication flow on that host.
 
 **Headless Flow (Docker / Server Environments):**
 In a Docker container, you have two options:

@@ -15,6 +15,9 @@ from mcp.types import ToolAnnotations
 from dotenv import load_dotenv
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 import os
 import sys
 import json
@@ -23,12 +26,14 @@ import hashlib
 import urllib.parse
 import secrets
 import webbrowser
-import threading
 import asyncio
 import re
+import stat
+import tempfile
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Generic, Literal, NoReturn, Optional, Dict, Any, List, TYPE_CHECKING, TypeVar
 
 # Load environment variables from a .env file if it exists
@@ -72,14 +77,28 @@ class InvalidParameterError(DomoticzError):
         self.message = message
 
 
+@asynccontextmanager
+async def _server_lifespan(_server: FastMCP):
+    """Close the shared upstream client when the MCP server stops."""
+    _open_oauth_login_manager()
+    try:
+        yield {}
+    finally:
+        await _shutdown_oauth_login_flow()
+        await close_global_client()
+
+
 mcp = FastMCP(
     "domoticz_mcp",
     instructions=(
         "Read domoticz://overview before operating the system. Prefer stable numeric "
-        "idx values for devices, scenes, and user variables. Event scripts use event IDs."
+        "idx values for devices, scenes, and user variables. If authentication needs "
+        "attention, call start_oauth_login, give its URL to the user, then poll "
+        "get_oauth_login_status. Event scripts use event IDs."
     ),
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     stateless_http=True,
+    lifespan=_server_lifespan,
 )
 
 # Configuration defaults
@@ -93,6 +112,16 @@ DOMOTICZ_OAUTH_TOKEN = None
 TOKEN_FILE = os.path.expanduser("~/.config/domoticz-mcp/token.json")
 _oauth_token_cache: Optional[str] = None
 _global_http_client: Optional[httpx.AsyncClient] = None
+HTTP_TIMEOUT_SECONDS = 30.0
+OAUTH_CALLBACK_TIMEOUT_SECONDS = 120.0
+OAUTH_CALLBACK_SOCKET_TIMEOUT_SECONDS = 0.25
+OAUTH_STATUS_RETENTION_SECONDS = 300.0
+OAUTH_TERMINAL_STATUS_LIMIT = 4
+AUTHENTICATION_REQUIRED_MESSAGE = (
+    "Domoticz authentication requires attention. Call `start_oauth_login`, or run "
+    "`domoticz-mcp --authenticate` in an interactive terminal. Alternatively, "
+    "configure a valid OAuth token or username/password."
+)
 
 # Cache settings
 CACHE_TTL = 300 # 5 minutes
@@ -132,6 +161,63 @@ class DomoticzToolResult(BaseModel):
 
     status: str = Field(description="Status returned by Domoticz, normally OK")
     title: str | None = Field(default=None, description="Optional Domoticz response title")
+
+
+class OAuthLoginStartResult(BaseModel):
+    """Safe details needed to continue a browser-based OAuth login."""
+
+    status: Literal["pending"] = Field(description="Login flow state")
+    flow_id: str = Field(description="Opaque identifier used to check this login flow")
+    authorization_url: str = Field(description="URL the user must open to authorize Domoticz")
+    expires_at: str = Field(description="UTC time when this login flow expires")
+    message: str = Field(description="Next action for the user or agent")
+
+
+class OAuthLoginStatusResult(BaseModel):
+    """Credential-free status for a browser-based OAuth login."""
+
+    status: Literal["pending", "complete", "expired", "error"] = Field(
+        description="Current login flow state"
+    )
+    flow_id: str = Field(description="Opaque login flow identifier")
+    expires_at: str = Field(description="UTC time when the authorization window expires")
+    message: str = Field(description="Current state and next action")
+
+
+@dataclass
+class _OAuthLoginFlow:
+    """Secret-bearing state for one in-process OAuth authorization flow."""
+
+    flow_id: str
+    state: str
+    code_verifier: str
+    authorization_url: str
+    redirect_uri: str
+    expires_at: str
+    expires_monotonic: float
+    callback_server: HTTPServer
+    callback_future: asyncio.Future[str]
+    event_loop: asyncio.AbstractEventLoop
+    callback_claimed: threading.Event = field(default_factory=threading.Event)
+    callback_thread: threading.Thread | None = None
+    supervisor_task: asyncio.Task[None] | None = None
+    authorization_code: str | None = None
+    listener_stop_task: asyncio.Task[None] | None = None
+
+
+@dataclass
+class _RetainedOAuthStatus:
+    """Credential-free terminal status retained briefly for polling."""
+
+    result: OAuthLoginStatusResult
+    retain_until_monotonic: float
+
+
+_oauth_login_flow_lock = threading.Lock()
+_oauth_login_start_lock = asyncio.Lock()
+_active_oauth_login_flow: _OAuthLoginFlow | None = None
+_oauth_terminal_statuses: OrderedDict[str, _RetainedOAuthStatus] = OrderedDict()
+_oauth_login_manager_closing = False
 
 
 ResultItem = TypeVar("ResultItem", bound=BaseModel)
@@ -328,7 +414,539 @@ def _command_url(param: str, params: Optional[Dict[str, Any]] = None) -> str:
     return f"{DOMOTICZ_API_URL}?{urllib.parse.urlencode(query, quote_via=urllib.parse.quote)}"
 
 
-def _do_interactive_oauth_flow():
+def _load_token_data() -> Dict[str, Any] | None:
+    """Load persisted OAuth data without exposing token contents."""
+    if not os.path.exists(TOKEN_FILE):
+        return None
+    try:
+        token_status = os.lstat(TOKEN_FILE)
+        if not stat.S_ISREG(token_status.st_mode):
+            raise ToolError("Refusing to read a non-regular Domoticz OAuth token file.")
+        if stat.S_IMODE(token_status.st_mode) != 0o600:
+            os.chmod(TOKEN_FILE, 0o600)
+        with open(TOKEN_FILE, "r", encoding="utf-8") as token_stream:
+            token_data = json.load(token_stream)
+    except ToolError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ToolError(f"Failed to load the Domoticz OAuth token file: {exc}") from exc
+    if not isinstance(token_data, dict):
+        raise ToolError("Failed to load the Domoticz OAuth token file: expected a JSON object.")
+    return token_data
+
+
+def _save_token_data(token_data: Dict[str, Any]) -> None:
+    """Atomically persist OAuth data with owner-only permissions."""
+    token_directory = os.path.dirname(TOKEN_FILE) or "."
+    os.makedirs(token_directory, exist_ok=True)
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=token_directory,
+            prefix=".token-",
+            suffix=".json",
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as token_stream:
+            json.dump(token_data, token_stream)
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, TOKEN_FILE)
+        temporary_path = None
+        os.chmod(TOKEN_FILE, 0o600)
+    except OSError as exc:
+        raise ToolError("Failed to securely save the Domoticz OAuth token file.") from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
+def _new_pkce_credentials() -> tuple[str, str, str]:
+    """Create independent OAuth state, verifier, and S256 challenge values."""
+    state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(48)
+    code_challenge = (
+        base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode("ascii")).digest()
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+    return state, code_verifier, code_challenge
+
+
+def _build_oauth_authorization_url(
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+) -> str:
+    """Build a Domoticz authorization URL without including any secret."""
+    return (
+        f"{DOMOTICZ_BASE_URL}/oauth2/v1/authorize?"
+        + urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": DOMOTICZ_CLIENT_ID,
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+            },
+            quote_via=urllib.parse.quote,
+        )
+    )
+
+
+def _send_oauth_callback_html(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    heading: str,
+    message: str,
+) -> None:
+    """Send a static, non-cacheable callback response."""
+    body = (
+        f"<html><body><h1>{heading}</h1><p>{message}</p></body></html>"
+    ).encode("utf-8")
+    handler.send_response(status_code)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+class _QuietOAuthHTTPServer(HTTPServer):
+    """HTTP server that never logs callback paths or authorization codes."""
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(OAUTH_CALLBACK_SOCKET_TIMEOUT_SECONDS)
+        return request, client_address
+
+    def handle_error(self, request, client_address):
+        pass
+
+
+def _record_oauth_callback(
+    flow: _OAuthLoginFlow,
+    signal: Literal["authorized", "oauth_error", "listener_error", "shutdown"],
+    authorization_code: str | None = None,
+) -> None:
+    """Record a callback result on the owning asyncio event loop."""
+    with _oauth_login_flow_lock:
+        if _active_oauth_login_flow is not flow or flow.callback_future.done():
+            return
+        if signal == "authorized":
+            flow.authorization_code = authorization_code
+        flow.callback_future.set_result(signal)
+
+
+def _serve_oauth_callback(flow: _OAuthLoginFlow) -> None:
+    """Serve one callback listener and report unexpected listener failure safely."""
+    try:
+        flow.callback_server.serve_forever(poll_interval=0.1)
+    except Exception:
+        try:
+            flow.event_loop.call_soon_threadsafe(
+                _record_oauth_callback,
+                flow,
+                "listener_error",
+                None,
+            )
+        except RuntimeError:
+            pass
+
+
+def _create_oauth_login_flow() -> _OAuthLoginFlow:
+    """Bind a loopback callback listener and create secret-bearing flow state."""
+    event_loop = asyncio.get_running_loop()
+    state, code_verifier, code_challenge = _new_pkce_credentials()
+    flow_id = secrets.token_urlsafe(32)
+    flow: _OAuthLoginFlow
+
+    class OAuthCallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            parsed_path = urllib.parse.urlparse(self.path)
+            if parsed_path.path != "/callback":
+                _send_oauth_callback_html(
+                    self,
+                    404,
+                    "Not found",
+                    "This callback path is not available.",
+                )
+                return
+
+            query = urllib.parse.parse_qs(
+                parsed_path.query,
+                keep_blank_values=True,
+            )
+            states = query.get("state", [])
+            codes = query.get("code", [])
+            errors = query.get("error", [])
+            if (
+                len(states) != 1
+                or not states[0]
+                or not secrets.compare_digest(states[0], flow.state)
+            ):
+                _send_oauth_callback_html(
+                    self,
+                    400,
+                    "Authentication rejected",
+                    "The callback state was invalid. Return to Codex and retry.",
+                )
+                return
+
+            valid_code = len(codes) == 1 and bool(codes[0]) and not errors
+            valid_error = len(errors) == 1 and bool(errors[0]) and not codes
+            if not valid_code and not valid_error:
+                _send_oauth_callback_html(
+                    self,
+                    400,
+                    "Authentication rejected",
+                    "The callback response was incomplete. Return to Codex and retry.",
+                )
+                return
+
+            if flow.callback_claimed.is_set():
+                _send_oauth_callback_html(
+                    self,
+                    409,
+                    "Authentication already received",
+                    "Return to Codex to check the login status.",
+                )
+                return
+            flow.callback_claimed.set()
+
+            signal: Literal["authorized", "oauth_error"]
+            authorization_code = None
+            if valid_code:
+                signal = "authorized"
+                authorization_code = codes[0]
+                status_code = 200
+                heading = "Authentication received"
+                message = "Return to Codex to check the login status."
+            else:
+                signal = "oauth_error"
+                status_code = 400
+                heading = "Authentication was not completed"
+                message = "Return to Codex and start a new login flow."
+
+            try:
+                flow.event_loop.call_soon_threadsafe(
+                    _record_oauth_callback,
+                    flow,
+                    signal,
+                    authorization_code,
+                )
+            except RuntimeError:
+                _send_oauth_callback_html(
+                    self,
+                    503,
+                    "Authentication unavailable",
+                    "The MCP server is no longer accepting this callback.",
+                )
+                return
+            _send_oauth_callback_html(self, status_code, heading, message)
+
+    callback_server = _QuietOAuthHTTPServer(("127.0.0.1", 0), OAuthCallbackHandler)
+    redirect_uri = f"http://127.0.0.1:{callback_server.server_port}/callback"
+    authorization_url = _build_oauth_authorization_url(
+        redirect_uri,
+        state,
+        code_challenge,
+    )
+    expires_at_datetime = datetime.now(timezone.utc) + timedelta(
+        seconds=OAUTH_CALLBACK_TIMEOUT_SECONDS
+    )
+    flow = _OAuthLoginFlow(
+        flow_id=flow_id,
+        state=state,
+        code_verifier=code_verifier,
+        authorization_url=authorization_url,
+        redirect_uri=redirect_uri,
+        expires_at=expires_at_datetime.isoformat().replace("+00:00", "Z"),
+        expires_monotonic=time.monotonic() + OAUTH_CALLBACK_TIMEOUT_SECONDS,
+        callback_server=callback_server,
+        callback_future=event_loop.create_future(),
+        event_loop=event_loop,
+    )
+    flow.callback_thread = threading.Thread(
+        target=_serve_oauth_callback,
+        args=(flow,),
+        name="domoticz-oauth-callback",
+        daemon=True,
+    )
+    return flow
+
+
+async def _stop_oauth_callback_listener(flow: _OAuthLoginFlow) -> None:
+    """Stop and join a callback listener exactly once."""
+    async def stop_listener() -> None:
+        callback_thread = flow.callback_thread
+        if callback_thread is not None and callback_thread.is_alive():
+            await asyncio.to_thread(flow.callback_server.shutdown)
+            await asyncio.to_thread(callback_thread.join, 1.0)
+        flow.callback_server.server_close()
+
+    with _oauth_login_flow_lock:
+        if flow.listener_stop_task is None:
+            flow.listener_stop_task = asyncio.create_task(stop_listener())
+        listener_stop_task = flow.listener_stop_task
+    await asyncio.shield(listener_stop_task)
+
+
+def _scrub_oauth_flow(flow: _OAuthLoginFlow) -> None:
+    """Remove secret-bearing values from a completed or abandoned flow."""
+    flow.state = ""
+    flow.code_verifier = ""
+    flow.authorization_code = None
+    flow.redirect_uri = ""
+    flow.authorization_url = ""
+
+
+def _purge_oauth_terminal_statuses_locked(now: float) -> None:
+    """Drop retained terminal statuses after their short polling window."""
+    expired_ids = [
+        flow_id
+        for flow_id, retained in _oauth_terminal_statuses.items()
+        if retained.retain_until_monotonic <= now
+    ]
+    for flow_id in expired_ids:
+        _oauth_terminal_statuses.pop(flow_id, None)
+
+
+def _retain_oauth_terminal_status(
+    flow: _OAuthLoginFlow,
+    status: Literal["complete", "expired", "error"],
+    message: str,
+) -> None:
+    """Replace active secret state with a bounded credential-free status."""
+    global _active_oauth_login_flow
+    result = OAuthLoginStatusResult(
+        status=status,
+        flow_id=flow.flow_id,
+        expires_at=flow.expires_at,
+        message=message,
+    )
+    with _oauth_login_flow_lock:
+        if _active_oauth_login_flow is flow:
+            _active_oauth_login_flow = None
+        _purge_oauth_terminal_statuses_locked(time.monotonic())
+        _oauth_terminal_statuses[flow.flow_id] = _RetainedOAuthStatus(
+            result=result,
+            retain_until_monotonic=time.monotonic()
+            + OAUTH_STATUS_RETENTION_SECONDS,
+        )
+        while len(_oauth_terminal_statuses) > OAUTH_TERMINAL_STATUS_LIMIT:
+            _oauth_terminal_statuses.popitem(last=False)
+        _scrub_oauth_flow(flow)
+
+
+async def _supervise_oauth_login_flow(flow: _OAuthLoginFlow) -> None:
+    """Wait for the callback, exchange the code, and retain only safe status."""
+    terminal_status: Literal["complete", "expired", "error"] | None = None
+    terminal_message = ""
+    try:
+        remaining = max(0.0, flow.expires_monotonic - time.monotonic())
+        signal = await asyncio.wait_for(
+            asyncio.shield(flow.callback_future),
+            timeout=remaining,
+        )
+        await _stop_oauth_callback_listener(flow)
+
+        if signal == "oauth_error":
+            terminal_status = "error"
+            terminal_message = (
+                "Domoticz did not authorize the request. Start a new login flow."
+            )
+            return
+        if signal == "listener_error":
+            terminal_status = "error"
+            terminal_message = (
+                "The local OAuth callback listener failed. Start a new login flow."
+            )
+            return
+        if signal == "shutdown":
+            return
+        if not flow.authorization_code:
+            terminal_status = "error"
+            terminal_message = (
+                "Domoticz returned an incomplete callback. Start a new login flow."
+            )
+            return
+
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
+            token_endpoint = await _discover_token_endpoint(client)
+            async with _token_refresh_lock:
+                existing_token_data = _load_token_data()
+                token_auth = (
+                    (DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET)
+                    if DOMOTICZ_CLIENT_SECRET
+                    else None
+                )
+                token_response = await client.post(
+                    token_endpoint,
+                    auth=token_auth,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": flow.authorization_code,
+                        "redirect_uri": flow.redirect_uri,
+                        "client_id": DOMOTICZ_CLIENT_ID,
+                        "code_verifier": flow.code_verifier,
+                    },
+                )
+                token_response.raise_for_status()
+                _cache_and_save_token(
+                    token_response.json(),
+                    existing_token_data,
+                )
+        terminal_status = "complete"
+        terminal_message = (
+            "Domoticz authentication is complete. Retry the original operation."
+        )
+    except asyncio.TimeoutError:
+        terminal_status = "expired"
+        terminal_message = "The login flow expired. Start a new login flow."
+    except asyncio.CancelledError:
+        raise
+    except (httpx.HTTPError, ToolError, ValueError):
+        terminal_status = "error"
+        terminal_message = (
+            "The OAuth token exchange failed. Check the Domoticz OAuth configuration "
+            "and start a new login flow."
+        )
+    finally:
+        await _stop_oauth_callback_listener(flow)
+        if terminal_status is None:
+            with _oauth_login_flow_lock:
+                global _active_oauth_login_flow
+                if _active_oauth_login_flow is flow:
+                    _active_oauth_login_flow = None
+                _scrub_oauth_flow(flow)
+        else:
+            _retain_oauth_terminal_status(
+                flow,
+                terminal_status,
+                terminal_message,
+            )
+
+
+async def _start_oauth_login_flow() -> OAuthLoginStartResult:
+    """Start or reuse the one active non-blocking OAuth login flow."""
+    global _active_oauth_login_flow
+    if not DOMOTICZ_CLIENT_ID:
+        raise ToolError(
+            "OAuth login requires DOMOTICZ_CLIENT_ID to be configured."
+        )
+
+    async with _oauth_login_start_lock:
+        with _oauth_login_flow_lock:
+            if _oauth_login_manager_closing:
+                raise ToolError(
+                    "OAuth login is unavailable while the MCP server is shutting down."
+                )
+            _purge_oauth_terminal_statuses_locked(time.monotonic())
+            active_flow = _active_oauth_login_flow
+            if active_flow is not None:
+                return OAuthLoginStartResult(
+                    status="pending",
+                    flow_id=active_flow.flow_id,
+                    authorization_url=active_flow.authorization_url,
+                    expires_at=active_flow.expires_at,
+                    message=(
+                        "Open the authorization URL, then call "
+                        "get_oauth_login_status with this flow_id."
+                    ),
+                )
+
+        flow = _create_oauth_login_flow()
+        with _oauth_login_flow_lock:
+            _active_oauth_login_flow = flow
+        flow.callback_thread.start()
+        flow.supervisor_task = asyncio.create_task(
+            _supervise_oauth_login_flow(flow),
+            name=f"domoticz-oauth-login-{flow.flow_id}",
+        )
+        return OAuthLoginStartResult(
+            status="pending",
+            flow_id=flow.flow_id,
+            authorization_url=flow.authorization_url,
+            expires_at=flow.expires_at,
+            message=(
+                "Open the authorization URL, then call get_oauth_login_status "
+                "with this flow_id."
+            ),
+        )
+
+
+def _get_oauth_login_flow_status(flow_id: str) -> OAuthLoginStatusResult:
+    """Return safe status for the active or recently completed login flow."""
+    with _oauth_login_flow_lock:
+        _purge_oauth_terminal_statuses_locked(time.monotonic())
+        if (
+            _active_oauth_login_flow is not None
+            and _active_oauth_login_flow.flow_id == flow_id
+        ):
+            flow = _active_oauth_login_flow
+            message = (
+                "Completing the OAuth token exchange."
+                if flow.callback_future.done()
+                else "Waiting for the user to open and approve the authorization URL."
+            )
+            return OAuthLoginStatusResult(
+                status="pending",
+                flow_id=flow.flow_id,
+                expires_at=flow.expires_at,
+                message=message,
+            )
+        retained = _oauth_terminal_statuses.get(flow_id)
+        if retained is not None:
+            return retained.result
+    raise ToolError(
+        "OAuth login flow not found or no longer retained. Start a new login flow."
+    )
+
+
+async def _shutdown_oauth_login_flow() -> None:
+    """Cancel and drain any active flow during MCP server shutdown."""
+    global _active_oauth_login_flow, _oauth_login_manager_closing
+    async with _oauth_login_start_lock:
+        with _oauth_login_flow_lock:
+            _oauth_login_manager_closing = True
+            flow = _active_oauth_login_flow
+            task = flow.supervisor_task if flow is not None else None
+    if task is not None and not task.done():
+        if flow is not None and not flow.callback_future.done():
+            flow.callback_future.set_result("shutdown")
+        else:
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    elif flow is not None:
+        await _stop_oauth_callback_listener(flow)
+        with _oauth_login_flow_lock:
+            if _active_oauth_login_flow is flow:
+                _active_oauth_login_flow = None
+            _scrub_oauth_flow(flow)
+    with _oauth_login_flow_lock:
+        _oauth_terminal_statuses.clear()
+
+
+def _open_oauth_login_manager() -> None:
+    """Allow login starts for a newly entered MCP server lifespan."""
+    global _oauth_login_manager_closing
+    with _oauth_login_flow_lock:
+        _oauth_login_manager_closing = False
+
+
+def _do_interactive_oauth_flow(
+    timeout_seconds: float = OAUTH_CALLBACK_TIMEOUT_SECONDS,
+) -> tuple[str | None, str | None, str | None]:
+    """Run an explicitly requested browser flow with a bounded callback wait."""
     code = None
     state_received = None
 
@@ -341,28 +959,38 @@ def _do_interactive_oauth_flow():
             parsed_path = urllib.parse.urlparse(self.path)
             if parsed_path.path == '/callback':
                 query = urllib.parse.parse_qs(parsed_path.query)
-                if 'code' in query:
-                    code = query['code'][0]
-                if 'state' in query:
-                    state_received = query['state'][0]
+                received_code = query.get('code', [None])[0]
+                received_state = query.get('state', [None])[0]
+                if not received_code or received_state != state:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
+                    self.wfile.write(
+                        b"<html><body><h1>Authentication rejected</h1>"
+                        b"<p>The callback state was invalid. Please retry.</p></body></html>"
+                    )
+                    return
+                code = received_code
+                state_received = received_state
                 self.send_response(200)
                 self.send_header('Content-type', 'text/html')
                 self.end_headers()
                 self.wfile.write(b"<html><body><h1>Authentication successful!</h1><p>You can close this window now and return to the application.</p></body></html>")
-                threading.Thread(target=self.server.shutdown).start()
             else:
                 self.send_response(404)
                 self.end_headers()
 
-    server = HTTPServer(('127.0.0.1', 0), CallbackHandler)
-    port = server.server_port
+    callback_server = _QuietOAuthHTTPServer(('127.0.0.1', 0), CallbackHandler)
+    port = callback_server.server_port
 
-    state = secrets.token_urlsafe(16)
-    code_verifier = secrets.token_urlsafe(32)
-    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode('ascii')).digest()).decode('ascii').rstrip('=')
+    state, code_verifier, code_challenge = _new_pkce_credentials()
 
     redirect_uri = f"http://127.0.0.1:{port}/callback"
-    auth_url = f"{DOMOTICZ_BASE_URL}/oauth2/v1/authorize?response_type=code&client_id={DOMOTICZ_CLIENT_ID}&redirect_uri={urllib.parse.quote(redirect_uri)}&state={state}&code_challenge={code_challenge}&code_challenge_method=S256"
+    auth_url = _build_oauth_authorization_url(
+        redirect_uri,
+        state,
+        code_challenge,
+    )
 
     sys.stderr.write("\n==========================================================\n")
     sys.stderr.write("Authentication required for Domoticz MCP Server.\n")
@@ -377,20 +1005,81 @@ def _do_interactive_oauth_flow():
     except Exception:
         pass
 
-    server.serve_forever()
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    try:
+        while not (code and state_received == state) and time.monotonic() < deadline:
+            callback_server.timeout = min(1.0, max(0.0, deadline - time.monotonic()))
+            callback_server.handle_request()
+    finally:
+        callback_server.server_close()
 
     if code and state_received == state:
         return code, code_verifier, redirect_uri
+    sys.stderr.write("Domoticz authentication timed out waiting for the browser callback.\n")
+    sys.stderr.flush()
     return None, None, None
 
 _token_refresh_lock = asyncio.Lock()
 
-async def _fetch_oauth_token(force_refresh: bool = False, old_token: Optional[str] = None) -> Optional[str]:
+async def _discover_token_endpoint(client: httpx.AsyncClient) -> str:
+    """Discover and normalize the configured Domoticz token endpoint."""
+    discovery_url = f"{DOMOTICZ_BASE_URL}/.well-known/openid-configuration"
+    response = await client.get(discovery_url)
+    response.raise_for_status()
+    config = response.json()
+    token_endpoint = config.get("token_endpoint")
+    if not token_endpoint:
+        raise ToolError("Domoticz OAuth discovery did not provide a token endpoint.")
+    if "127.0.0.1" in token_endpoint or "localhost" in token_endpoint:
+        parsed = urllib.parse.urlparse(token_endpoint)
+        token_endpoint = f"{DOMOTICZ_BASE_URL}{parsed.path}"
+    parsed_endpoint = urllib.parse.urlparse(token_endpoint)
+    if (
+        parsed_endpoint.scheme not in {"http", "https"}
+        or not parsed_endpoint.netloc
+        or parsed_endpoint.username
+        or parsed_endpoint.password
+    ):
+        raise ToolError("Domoticz OAuth discovery returned an unsafe token endpoint.")
+    return token_endpoint
+
+
+def _cache_and_save_token(
+    token_data: Dict[str, Any],
+    existing_token_data: Dict[str, Any] | None,
+) -> Optional[str]:
+    """Update the in-memory token and securely persist its refresh metadata."""
+    global _oauth_token_cache
+    if (
+        "refresh_token" not in token_data
+        and existing_token_data
+        and "refresh_token" in existing_token_data
+    ):
+        token_data["refresh_token"] = existing_token_data["refresh_token"]
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise ToolError("Domoticz OAuth token response did not include an access token.")
+    _oauth_token_cache = access_token
+    _save_token_data(token_data)
+    if _global_http_client is not None and not _global_http_client.is_closed:
+        _global_http_client.headers["Authorization"] = f"Bearer {access_token}"
+        _global_http_client.auth = None
+    return _oauth_token_cache
+
+
+async def _fetch_oauth_token(
+    force_refresh: bool = False,
+    old_token: Optional[str] = None,
+    *,
+    allow_interactive: bool = False,
+) -> Optional[str]:
+    """Load or refresh OAuth credentials without prompting from MCP requests."""
     global _oauth_token_cache
 
     if not force_refresh and _oauth_token_cache:
         return _oauth_token_cache
 
+    interactive_context: tuple[str, tuple[str, str] | None, Dict[str, Any] | None] | None = None
     async with _token_refresh_lock:
         # Check if another task already refreshed the token while we were waiting
         if force_refresh and old_token is not None and _oauth_token_cache != old_token:
@@ -399,38 +1088,18 @@ async def _fetch_oauth_token(force_refresh: bool = False, old_token: Optional[st
         if not force_refresh and _oauth_token_cache:
             return _oauth_token_cache
 
-        # Try loading from file
-        existing_token_data = None
-        if os.path.exists(TOKEN_FILE):
-            try:
-                with open(TOKEN_FILE, 'r') as f:
-                    existing_token_data = json.load(f)
-                    if not force_refresh and existing_token_data and "access_token" in existing_token_data:
-                        _oauth_token_cache = existing_token_data["access_token"]
-                        return _oauth_token_cache
-            except Exception as e:
-                sys.stderr.write(f"Failed to load token file: {e}\n")
+        existing_token_data = _load_token_data()
+        if not force_refresh and existing_token_data and "access_token" in existing_token_data:
+            _oauth_token_cache = existing_token_data["access_token"]
+            return _oauth_token_cache
 
         if not DOMOTICZ_CLIENT_ID:
             return None
 
         try:
-            async with httpx.AsyncClient() as client:
-                discovery_url = f"{DOMOTICZ_BASE_URL}/.well-known/openid-configuration"
-                resp = await client.get(discovery_url)
-                resp.raise_for_status()
-                config = resp.json()
-
-                token_endpoint = config.get("token_endpoint")
-                if token_endpoint:
-                    if "127.0.0.1" in token_endpoint or "localhost" in token_endpoint:
-                        parsed = urllib.parse.urlparse(token_endpoint)
-                        token_endpoint = f"{DOMOTICZ_BASE_URL}{parsed.path}"
-                else:
-                    return None
-
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
+                token_endpoint = await _discover_token_endpoint(client)
                 auth = (DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET) if DOMOTICZ_CLIENT_SECRET else None
-                token_resp = None
 
                 # Try refresh token first
                 if force_refresh and existing_token_data and "refresh_token" in existing_token_data:
@@ -442,70 +1111,83 @@ async def _fetch_oauth_token(force_refresh: bool = False, old_token: Optional[st
                     if DOMOTICZ_CLIENT_SECRET:
                         data["client_secret"] = DOMOTICZ_CLIENT_SECRET
 
-                    try:
-                        refresh_resp = await client.post(
-                            token_endpoint,
-                            auth=auth,
-                            data=data
-                        )
-                        if refresh_resp.status_code == 200:
-                            token_resp = refresh_resp
-                        else:
-                            sys.stderr.write(f"Failed to refresh token (Status: {refresh_resp.status_code}), re-authenticating...\n")
-                    except Exception as e:
-                        sys.stderr.write(f"Exception during token refresh: {e}\n")
-
-                # If no token_resp yet, perform initial flow
-                if token_resp is None:
-                    if DOMOTICZ_USERNAME and DOMOTICZ_PASSWORD:
-                        data = {
-                            "grant_type": "password",
-                            "client_id": DOMOTICZ_CLIENT_ID,
-                            "client_secret": DOMOTICZ_CLIENT_SECRET
-                        }
-                        token_resp = await client.post(
-                            token_endpoint,
-                            auth=(DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD),
-                            data=data
-                        )
-                    else:
-                        code, code_verifier, redirect_uri = await asyncio.to_thread(_do_interactive_oauth_flow)
-                        if not code:
-                            return None
-
-                        data = {
-                            "grant_type": "authorization_code",
-                            "code": code,
-                            "redirect_uri": redirect_uri,
-                            "client_id": DOMOTICZ_CLIENT_ID,
-                            "code_verifier": code_verifier
-                        }
-
-                        token_resp = await client.post(
-                            token_endpoint,
-                            auth=auth,
-                            data=data
+                    refresh_response = await client.post(token_endpoint, auth=auth, data=data)
+                    if refresh_response.status_code == 200:
+                        return _cache_and_save_token(
+                            refresh_response.json(),
+                            existing_token_data,
                         )
 
-                token_resp.raise_for_status()
-                token_data = token_resp.json()
+                if DOMOTICZ_USERNAME and DOMOTICZ_PASSWORD:
+                    data = {
+                        "grant_type": "password",
+                        "client_id": DOMOTICZ_CLIENT_ID,
+                        "client_secret": DOMOTICZ_CLIENT_SECRET,
+                    }
+                    token_response = await client.post(
+                        token_endpoint,
+                        auth=(DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD),
+                        data=data,
+                    )
+                    token_response.raise_for_status()
+                    return _cache_and_save_token(
+                        token_response.json(),
+                        existing_token_data,
+                    )
 
-                # Persist the old refresh token if the new response doesn't provide one
-                if "refresh_token" not in token_data and existing_token_data and "refresh_token" in existing_token_data:
-                    token_data["refresh_token"] = existing_token_data["refresh_token"]
+                if allow_interactive:
+                    interactive_context = (token_endpoint, auth, existing_token_data)
+                else:
+                    raise ToolError(AUTHENTICATION_REQUIRED_MESSAGE)
+        except ToolError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise ToolError(
+                "Domoticz OAuth request timed out. Check connectivity and authentication settings."
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ToolError(f"{AUTHENTICATION_REQUIRED_MESSAGE} ({type(exc).__name__})") from exc
 
-                _oauth_token_cache = token_data.get("access_token")
+    if interactive_context is None:
+        raise ToolError(AUTHENTICATION_REQUIRED_MESSAGE)
 
-                # Save token to file
-                os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-                with open(TOKEN_FILE, 'w') as f:
-                    json.dump(token_data, f)
+    token_endpoint, auth, existing_token_data = interactive_context
+    code, code_verifier, redirect_uri = await asyncio.to_thread(
+        _do_interactive_oauth_flow,
+        OAUTH_CALLBACK_TIMEOUT_SECONDS,
+    )
+    if not code:
+        raise ToolError(
+            "Domoticz authentication timed out. Re-run `domoticz-mcp --authenticate` to try again."
+        )
 
-                return _oauth_token_cache
-        except Exception as e:
-            import logging
-            logging.error(f"Failed to fetch OAuth token: {e}")
-            return None
+    async with _token_refresh_lock:
+        if old_token is not None and _oauth_token_cache != old_token:
+            return _oauth_token_cache
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
+                token_response = await client.post(
+                    token_endpoint,
+                    auth=auth,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                        "client_id": DOMOTICZ_CLIENT_ID,
+                        "code_verifier": code_verifier,
+                    },
+                )
+                token_response.raise_for_status()
+                return _cache_and_save_token(
+                    token_response.json(),
+                    existing_token_data,
+                )
+        except httpx.TimeoutException as exc:
+            raise ToolError("Domoticz OAuth token exchange timed out.") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ToolError(
+                f"Domoticz OAuth token exchange failed ({type(exc).__name__})."
+            ) from exc
 
 async def _do_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
     """Perform a request with a single retry on 401 Unauthorized to handle expired tokens."""
@@ -531,24 +1213,35 @@ async def _do_request(client: httpx.AsyncClient, method: str, url: str, **kwargs
 
         resp.raise_for_status()
         return resp
+    except httpx.TimeoutException as e:
+        raise ToolError(
+            "Domoticz request timed out. Check the Domoticz connection and try again."
+        ) from e
+    except httpx.RequestError as e:
+        raise ToolError(
+            f"Could not connect to Domoticz ({type(e).__name__}). Check the configured URL."
+        ) from e
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            raise Exception("Authentication failed. Please check your credentials or re-authenticate.")
+            raise ToolError(AUTHENTICATION_REQUIRED_MESSAGE) from e
         raise e
 
 # Custom AsyncClient wrapper that ensures the token is added
 class DomoticzClient:
     def __init__(self, own_client: bool = False):
+        global _global_http_client
         self._own_client = own_client
-        if own_client or _global_http_client is None:
-            self.client: httpx.AsyncClient = httpx.AsyncClient(timeout=30.0)
+        if own_client:
+            self.client = httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS)
             self._owns_client = True
         else:
+            if _global_http_client is None or _global_http_client.is_closed:
+                _global_http_client = httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS)
             self.client = _global_http_client
             self._owns_client = False
 
     async def __aenter__(self) -> "httpx.AsyncClient":
-        oauth_token = DOMOTICZ_OAUTH_TOKEN or _oauth_token_cache
+        oauth_token = _oauth_token_cache or DOMOTICZ_OAUTH_TOKEN
 
         if DOMOTICZ_CLIENT_ID and not oauth_token:
             oauth_token = await _fetch_oauth_token()
@@ -581,6 +1274,20 @@ async def close_global_client() -> None:
     if _global_http_client is not None:
         await _global_http_client.aclose()
         _global_http_client = None
+
+
+async def _gather_cancel_on_error(*awaitables: Any) -> list[Any]:
+    """Run independent work concurrently and drain siblings after any failure."""
+    tasks = [asyncio.create_task(awaitable) for awaitable in awaitables]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
 
 async def _get_cached_data(client: "httpx.AsyncClient", cache_obj: Dict[str, Any], api_url: str, key_path: str = "result") -> List[Dict[str, Any]]:
     while True:
@@ -990,13 +1697,15 @@ async def _get_energy_history(
 async def get_overview(detail_level: str = "minimal") -> str:
     """Internal: High-level overview."""
     async with create_client() as client:
-        resp = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getversion")
+        resp, devices, scenes, vars, plans, hw_resp = await _gather_cancel_on_error(
+            _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getversion"),
+            _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true"),
+            _get_cached_data(client, _scene_cache, f"{DOMOTICZ_API_URL}?type=command&param=getscenes"),
+            _get_cached_data(client, _user_variable_cache, f"{DOMOTICZ_API_URL}?type=command&param=getuservariables"),
+            _get_cached_data(client, _plans_cache, f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true"),
+            _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=gethardware"),
+        )
         sys_info = _domoticz_payload(resp, "Reading Domoticz version")
-        devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
-        scenes = await _get_cached_data(client, _scene_cache, f"{DOMOTICZ_API_URL}?type=command&param=getscenes")
-        vars = await _get_cached_data(client, _user_variable_cache, f"{DOMOTICZ_API_URL}?type=command&param=getuservariables")
-        plans = await _get_cached_data(client, _plans_cache, f"{DOMOTICZ_API_URL}?type=command&param=getplans&order=name&used=true")
-        hw_resp = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
         hardware = _domoticz_payload(hw_resp, "Reading hardware").get("result", [])
         overview = {
             "system": {"version": sys_info.get("version"), "build_time": sys_info.get("build_time"), "domoticz_url": DOMOTICZ_BASE_URL},
@@ -1498,6 +2207,38 @@ async def get_blockly_docs() -> str:
     return "Blockly in Domoticz uses an XML representation: <xml xmlns=\"...\"> ... </xml>"
 
 # --- Tools ---
+
+@mcp.tool(
+    title="Start Domoticz OAuth login",
+    annotations=_tool_annotations(
+        read_only=False,
+        destructive=False,
+        idempotent=True,
+    ),
+)
+async def start_oauth_login() -> OAuthLoginStartResult:
+    """Start or reuse a bounded browser login. Open the returned URL, then poll get_oauth_login_status."""
+    return await _start_oauth_login_flow()
+
+
+@mcp.tool(
+    title="Get Domoticz OAuth login status",
+    annotations=_tool_annotations(read_only=True),
+)
+async def get_oauth_login_status(
+    flow_id: Annotated[
+        str,
+        Field(
+            min_length=32,
+            max_length=128,
+            pattern=r"^[A-Za-z0-9_-]+$",
+            description="Opaque flow identifier returned by start_oauth_login",
+        ),
+    ],
+) -> OAuthLoginStatusResult:
+    """Check a browser login. Retry the original operation only after status is complete."""
+    return _get_oauth_login_flow_status(flow_id)
+
 
 @mcp.tool(
     title="Search event scripts",
@@ -2100,6 +2841,22 @@ def energy_audit() -> str:
 
 import argparse
 
+
+async def _run_explicit_authentication() -> str:
+    """Complete explicitly requested authentication or fail before server startup."""
+    token = await _fetch_oauth_token(
+        force_refresh=True,
+        old_token=_oauth_token_cache,
+        allow_interactive=True,
+    )
+    if not token:
+        raise ToolError(
+            "No OAuth token was obtained. Configure DOMOTICZ_CLIENT_ID before using "
+            "`--authenticate`, or configure a direct OAuth token or username/password."
+        )
+    return token
+
+
 def main():
     global DOMOTICZ_BASE_URL, DOMOTICZ_API_URL, DOMOTICZ_USERNAME, DOMOTICZ_PASSWORD
     global DOMOTICZ_CLIENT_ID, DOMOTICZ_CLIENT_SECRET, DOMOTICZ_OAUTH_TOKEN, TOKEN_FILE, _oauth_token_cache
@@ -2116,6 +2873,11 @@ def main():
     parser.add_argument("--domoticz-client-secret", help="Domoticz OAuth client secret")
     parser.add_argument("--domoticz-oauth-token", help="Domoticz OAuth token")
     parser.add_argument("--token-file", help="Path to OAuth token storage file")
+    parser.add_argument(
+        "--authenticate",
+        action="store_true",
+        help="Run the bounded interactive OAuth flow before starting the MCP server",
+    )
 
     args = parser.parse_args()
 
@@ -2165,6 +2927,12 @@ def main():
     _oauth_token_cache = DOMOTICZ_OAUTH_TOKEN
 
     transport, host, port = final_config["transport"]["value"], final_config["host"]["value"], final_config["port"]["value"]
+
+    if args.authenticate:
+        try:
+            asyncio.run(_run_explicit_authentication())
+        except ToolError as exc:
+            parser.exit(1, f"Authentication failed: {exc}\n")
 
     if transport in ["sse", "streamable-http"]:
         import uvicorn

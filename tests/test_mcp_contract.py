@@ -41,7 +41,7 @@ async def test_mcp_tools_expose_complete_contract_metadata():
     async with create_connected_server_and_client_session(server.mcp) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
 
-    assert len(tools) == 27
+    assert len(tools) == 29
     for tool in tools.values():
         assert tool.title
         assert tool.outputSchema
@@ -60,6 +60,7 @@ async def test_mcp_tools_expose_complete_contract_metadata():
         "get_daily_energy_history",
         "get_weekly_energy_history",
         "get_monthly_energy_history",
+        "get_oauth_login_status",
     }
     assert {name for name, tool in tools.items() if tool.annotations.readOnlyHint} == read_only
     assert tools["restart_system"].annotations.destructiveHint is True
@@ -73,6 +74,7 @@ async def test_mcp_tools_expose_complete_contract_metadata():
         "create_virtual_sensor",
         "add_log_message",
         "send_notification",
+        "start_oauth_login",
     }
     assert {
         name
@@ -95,6 +97,10 @@ async def test_mcp_tools_expose_complete_contract_metadata():
     energy_schema = tools["get_daily_energy_history"].outputSchema
     assert "EnergyHistorySummary" in energy_schema["$defs"]
     assert "EnergyHistorySample" in energy_schema["$defs"]
+    assert tools["start_oauth_login"].outputSchema["properties"]["status"]["const"] == "pending"
+    assert set(
+        tools["get_oauth_login_status"].outputSchema["properties"]["status"]["enum"]
+    ) == {"pending", "complete", "expired", "error"}
 
 
 @pytest.mark.asyncio

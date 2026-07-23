@@ -2,8 +2,16 @@ import pytest
 import respx
 import httpx
 from httpx import Response
+import base64
+import hashlib
 import json
 import asyncio
+import queue
+import socket
+import stat
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from mcp.server.fastmcp.exceptions import ToolError
 import domoticz_mcp.server as server_module
@@ -737,9 +745,363 @@ def test_client_lifecycle():
     assert client._owns_client is True
     assert client._own_client is True
 
+
+@pytest.mark.asyncio
+async def test_default_clients_reuse_shared_http_client():
+    await server_module.close_global_client()
+    try:
+        first = create_client()
+        second = create_client()
+
+        assert first.client is second.client
+        assert first._owns_client is False
+        assert second._owns_client is False
+
+        async with first as first_client:
+            pass
+        assert first_client.is_closed is False
+
+        await server_module.close_global_client()
+        assert first_client.is_closed is True
+        assert server_module._global_http_client is None
+
+        await server_module.close_global_client()
+    finally:
+        await server_module.close_global_client()
+
+
 def test_default_domoticz_url_is_localhost():
     assert server_module.DOMOTICZ_BASE_URL == "http://127.0.0.1:8080"
     assert server_module.DOMOTICZ_API_URL == "http://127.0.0.1:8080/json.htm"
+
+
+def test_new_oauth_token_file_uses_owner_only_permissions(tmp_path, monkeypatch):
+    token_file = tmp_path / "token.json"
+    monkeypatch.setattr(server_module, "TOKEN_FILE", str(token_file))
+
+    server_module._save_token_data({"access_token": "test-token"})
+
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+async def _prepare_oauth_tool_test(tmp_path, monkeypatch):
+    await server_module._shutdown_oauth_login_flow()
+    server_module._open_oauth_login_manager()
+    await server_module.close_global_client()
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "old-test-access-token",
+        "refresh_token": "preserved-test-refresh-token",
+    }))
+    token_file.chmod(0o600)
+    monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "test-client-id")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setattr(server_module, "DOMOTICZ_USERNAME", None)
+    monkeypatch.setattr(server_module, "DOMOTICZ_PASSWORD", None)
+    monkeypatch.setattr(server_module, "DOMOTICZ_OAUTH_TOKEN", None)
+    monkeypatch.setattr(server_module, "TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(server_module, "_oauth_token_cache", "old-test-access-token")
+    monkeypatch.setattr(server_module, "_oauth_login_start_lock", asyncio.Lock())
+    monkeypatch.setattr(server_module, "_token_refresh_lock", asyncio.Lock())
+    monkeypatch.setattr(server_module, "OAUTH_CALLBACK_TIMEOUT_SECONDS", 2.0)
+    return token_file
+
+
+def _oauth_callback_url(authorization_url, **callback_params):
+    authorization_query = urllib.parse.parse_qs(
+        urllib.parse.urlparse(authorization_url).query
+    )
+    callback_params.setdefault("state", authorization_query["state"][0])
+    return (
+        authorization_query["redirect_uri"][0]
+        + "?"
+        + urllib.parse.urlencode(callback_params)
+    )
+
+
+def _request_oauth_callback(callback_url):
+    try:
+        with urllib.request.urlopen(callback_url, timeout=1) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        return exc.code
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oauth_tools_complete_login_without_exposing_credentials(
+    tmp_path,
+    monkeypatch,
+):
+    token_file = await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+    discovery_route = respx.get(
+        "https://domoticz.example/.well-known/openid-configuration"
+    ).mock(return_value=Response(200, json={
+        "token_endpoint": "https://domoticz.example/oauth/token",
+    }))
+    token_route = respx.post("https://domoticz.example/oauth/token").mock(
+        return_value=Response(200, json={"access_token": "new-test-access-token"})
+    )
+    shared_client = httpx.AsyncClient()
+    monkeypatch.setattr(server_module, "_global_http_client", shared_client)
+
+    try:
+        started = await server_module.start_oauth_login()
+        with server_module._oauth_login_flow_lock:
+            flow = server_module._active_oauth_login_flow
+        assert flow is not None
+
+        serialized_start = started.model_dump_json()
+        assert "test-client-secret" not in serialized_start
+        assert "preserved-test-refresh-token" not in serialized_start
+        assert flow.code_verifier not in serialized_start
+        authorization_query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(started.authorization_url).query
+        )
+        expected_challenge = (
+            base64.urlsafe_b64encode(
+                hashlib.sha256(flow.code_verifier.encode("ascii")).digest()
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+        assert authorization_query["code_challenge"] == [expected_challenge]
+
+        wrong_state_status = await asyncio.to_thread(
+            _request_oauth_callback,
+            _oauth_callback_url(
+                started.authorization_url,
+                code="ignored-test-code",
+                state="wrong-state",
+            ),
+        )
+        assert wrong_state_status == 400
+        assert (
+            await server_module.get_oauth_login_status(started.flow_id)
+        ).status == "pending"
+
+        accepted_status = await asyncio.to_thread(
+            _request_oauth_callback,
+            _oauth_callback_url(
+                started.authorization_url,
+                code="accepted-test-code",
+            ),
+        )
+        assert accepted_status == 200
+        await asyncio.wait_for(flow.supervisor_task, timeout=1)
+
+        completed = await server_module.get_oauth_login_status(started.flow_id)
+        assert completed.status == "complete"
+        assert "token" not in completed.model_dump_json().lower()
+        saved_token_data = json.loads(token_file.read_text())
+        assert saved_token_data == {
+            "access_token": "new-test-access-token",
+            "refresh_token": "preserved-test-refresh-token",
+        }
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+        assert shared_client.headers["Authorization"] == "Bearer new-test-access-token"
+        assert flow.code_verifier == ""
+        assert flow.authorization_code is None
+        assert discovery_route.calls.call_count == 1
+        assert token_route.calls.call_count == 1
+    finally:
+        await server_module._shutdown_oauth_login_flow()
+        await server_module.close_global_client()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_concurrent_oauth_tool_start_reuses_one_flow(tmp_path, monkeypatch):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+
+    try:
+        first, second = await asyncio.gather(
+            server_module.start_oauth_login(),
+            server_module.start_oauth_login(),
+        )
+
+        assert first.flow_id == second.flow_id
+        assert first.authorization_url == second.authorization_url
+        assert len(respx.calls) == 0
+        with server_module._oauth_login_flow_lock:
+            flow = server_module._active_oauth_login_flow
+        assert flow is not None
+        assert flow.callback_thread is not None
+        assert flow.callback_thread.is_alive()
+    finally:
+        await server_module._shutdown_oauth_login_flow()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oauth_tool_flow_expires_and_closes_listener(tmp_path, monkeypatch):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+    monkeypatch.setattr(server_module, "OAUTH_CALLBACK_TIMEOUT_SECONDS", 0.01)
+
+    partial_client = None
+    try:
+        started = await server_module.start_oauth_login()
+        with server_module._oauth_login_flow_lock:
+            flow = server_module._active_oauth_login_flow
+        assert flow is not None
+        authorization_query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(started.authorization_url).query
+        )
+        redirect = urllib.parse.urlparse(authorization_query["redirect_uri"][0])
+        partial_client = socket.create_connection(
+            (redirect.hostname, redirect.port),
+            timeout=1,
+        )
+        partial_client.sendall(b"GET /callback HTTP/1.1\r\n")
+        await asyncio.wait_for(flow.supervisor_task, timeout=1)
+
+        expired = await server_module.get_oauth_login_status(started.flow_id)
+        assert expired.status == "expired"
+        assert flow.callback_thread is not None
+        assert flow.callback_thread.is_alive() is False
+        assert flow.code_verifier == ""
+    finally:
+        if partial_client is not None:
+            partial_client.close()
+        await server_module._shutdown_oauth_login_flow()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oauth_tool_reports_provider_rejection_without_exchange(
+    tmp_path,
+    monkeypatch,
+):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+
+    try:
+        started = await server_module.start_oauth_login()
+        with server_module._oauth_login_flow_lock:
+            flow = server_module._active_oauth_login_flow
+        assert flow is not None
+        callback_status = await asyncio.to_thread(
+            _request_oauth_callback,
+            _oauth_callback_url(
+                started.authorization_url,
+                error="access_denied",
+            ),
+        )
+        assert callback_status == 400
+        await asyncio.wait_for(flow.supervisor_task, timeout=1)
+
+        rejected = await server_module.get_oauth_login_status(started.flow_id)
+        assert rejected.status == "error"
+        assert "access_denied" not in rejected.model_dump_json()
+        assert len(respx.calls) == 0
+    finally:
+        await server_module._shutdown_oauth_login_flow()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oauth_tool_sanitizes_token_exchange_failure(tmp_path, monkeypatch):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+    respx.get(
+        "https://domoticz.example/.well-known/openid-configuration"
+    ).mock(return_value=Response(200, json={
+        "token_endpoint": "https://domoticz.example/oauth/token",
+    }))
+    token_route = respx.post("https://domoticz.example/oauth/token").mock(
+        return_value=Response(400, json={
+            "error": "invalid_grant",
+            "error_description": "test-sensitive-provider-detail",
+        })
+    )
+
+    try:
+        started = await server_module.start_oauth_login()
+        with server_module._oauth_login_flow_lock:
+            flow = server_module._active_oauth_login_flow
+        assert flow is not None
+        callback_status = await asyncio.to_thread(
+            _request_oauth_callback,
+            _oauth_callback_url(
+                started.authorization_url,
+                code="rejected-test-code",
+            ),
+        )
+        assert callback_status == 200
+        await asyncio.wait_for(flow.supervisor_task, timeout=1)
+
+        failed = await server_module.get_oauth_login_status(started.flow_id)
+        serialized_status = failed.model_dump_json()
+        assert failed.status == "error"
+        assert "test-sensitive-provider-detail" not in serialized_status
+        assert "rejected-test-code" not in serialized_status
+        assert token_route.calls.call_count == 1
+    finally:
+        await server_module._shutdown_oauth_login_flow()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oauth_tool_start_is_immediate_and_shutdown_cancels_discovery(
+    tmp_path,
+    monkeypatch,
+):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+    discovery_started = asyncio.Event()
+    discovery_cancelled = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def stalled_discovery(request):
+        discovery_started.set()
+        try:
+            await never_release.wait()
+        except asyncio.CancelledError:
+            discovery_cancelled.set()
+            raise
+
+    respx.get(
+        "https://domoticz.example/.well-known/openid-configuration"
+    ).mock(side_effect=stalled_discovery)
+
+    try:
+        started = await asyncio.wait_for(
+            server_module.start_oauth_login(),
+            timeout=0.2,
+        )
+        assert discovery_started.is_set() is False
+
+        callback_status = await asyncio.to_thread(
+            _request_oauth_callback,
+            _oauth_callback_url(
+                started.authorization_url,
+                code="accepted-test-code",
+            ),
+        )
+        assert callback_status == 200
+        await asyncio.wait_for(discovery_started.wait(), timeout=1)
+
+        await asyncio.wait_for(
+            server_module._shutdown_oauth_login_flow(),
+            timeout=1,
+        )
+        assert discovery_cancelled.is_set()
+        with pytest.raises(ToolError, match="shutting down"):
+            await server_module.start_oauth_login()
+    finally:
+        never_release.set()
+        await server_module._shutdown_oauth_login_flow()
+
+
+@pytest.mark.asyncio
+async def test_oauth_tool_requires_client_id_and_known_flow(tmp_path, monkeypatch):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", None)
+
+    with pytest.raises(ToolError, match="DOMOTICZ_CLIENT_ID"):
+        await server_module.start_oauth_login()
+    with pytest.raises(ToolError, match="not found"):
+        await server_module.get_oauth_login_status("A" * 32)
+
 
 @pytest.mark.asyncio
 async def test_create_client_uses_direct_oauth_token(monkeypatch):
@@ -761,6 +1123,7 @@ async def test_concurrent_oauth_refresh_only_refreshes_once(tmp_path, monkeypatc
         "access_token": "expired-token",
         "refresh_token": "refresh-token",
     }))
+    token_file.chmod(0o666)
 
     monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
     monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "client-id")
@@ -785,6 +1148,158 @@ async def test_concurrent_oauth_refresh_only_refreshes_once(tmp_path, monkeypatc
     assert tokens == ["fresh-token", "fresh-token"]
     assert discovery_route.calls.call_count == 1
     assert refresh_route.calls.call_count == 1
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_failed_oauth_refresh_fails_fast_without_browser(tmp_path, monkeypatch):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "expired-token",
+        "refresh_token": "invalid-refresh-token",
+    }))
+    token_file.chmod(0o666)
+
+    monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "client-id")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_SECRET", "client-secret")
+    monkeypatch.setattr(server_module, "DOMOTICZ_USERNAME", None)
+    monkeypatch.setattr(server_module, "DOMOTICZ_PASSWORD", None)
+    monkeypatch.setattr(server_module, "TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(server_module, "_oauth_token_cache", "expired-token")
+    monkeypatch.setattr(server_module, "_token_refresh_lock", asyncio.Lock())
+
+    def unexpected_interactive_flow(*args, **kwargs):
+        pytest.fail("MCP requests must not start interactive OAuth")
+
+    monkeypatch.setattr(
+        server_module,
+        "_do_interactive_oauth_flow",
+        unexpected_interactive_flow,
+    )
+    respx.get(
+        "https://domoticz.example/.well-known/openid-configuration"
+    ).mock(return_value=Response(200, json={
+        "token_endpoint": "https://domoticz.example/oauth/token",
+    }))
+    respx.post("https://domoticz.example/oauth/token").mock(
+        return_value=Response(400, json={"error": "invalid_grant"})
+    )
+
+    with pytest.raises(ToolError, match="--authenticate"):
+        await asyncio.wait_for(
+            server_module._fetch_oauth_token(
+                force_refresh=True,
+                old_token="expired-token",
+            ),
+            timeout=1,
+        )
+
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_interactive_oauth_waits_outside_refresh_lock(tmp_path, monkeypatch):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "expired-token",
+        "refresh_token": "invalid-refresh-token",
+    }))
+
+    monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "client-id")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_SECRET", "client-secret")
+    monkeypatch.setattr(server_module, "DOMOTICZ_USERNAME", None)
+    monkeypatch.setattr(server_module, "DOMOTICZ_PASSWORD", None)
+    monkeypatch.setattr(server_module, "TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(server_module, "_oauth_token_cache", "expired-token")
+    monkeypatch.setattr(server_module, "_token_refresh_lock", asyncio.Lock())
+
+    def bounded_interactive_flow(*args, **kwargs):
+        assert server_module._token_refresh_lock.locked() is False
+        return None, None, None
+
+    monkeypatch.setattr(
+        server_module,
+        "_do_interactive_oauth_flow",
+        bounded_interactive_flow,
+    )
+    respx.get(
+        "https://domoticz.example/.well-known/openid-configuration"
+    ).mock(return_value=Response(200, json={
+        "token_endpoint": "https://domoticz.example/oauth/token",
+    }))
+    respx.post("https://domoticz.example/oauth/token").mock(
+        return_value=Response(400, json={"error": "invalid_grant"})
+    )
+
+    with pytest.raises(ToolError, match="timed out"):
+        await server_module._fetch_oauth_token(
+            force_refresh=True,
+            old_token="expired-token",
+            allow_interactive=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_interactive_oauth_callback_has_deadline(monkeypatch):
+    monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "client-id")
+    monkeypatch.setattr(server_module.webbrowser, "open", lambda _url: False)
+
+    result = await asyncio.wait_for(
+        asyncio.to_thread(server_module._do_interactive_oauth_flow, 0),
+        timeout=1,
+    )
+
+    assert result == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_interactive_oauth_rejects_wrong_state_then_accepts_valid_callback(monkeypatch):
+    authorization_urls = queue.Queue()
+    monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
+    monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "client-id")
+    monkeypatch.setattr(
+        server_module.webbrowser,
+        "open",
+        lambda url: authorization_urls.put(url) or False,
+    )
+
+    flow_task = asyncio.create_task(
+        asyncio.to_thread(server_module._do_interactive_oauth_flow, 2)
+    )
+    authorization_url = await asyncio.wait_for(
+        asyncio.to_thread(authorization_urls.get, True, 1),
+        timeout=1,
+    )
+    authorization_query = urllib.parse.parse_qs(
+        urllib.parse.urlparse(authorization_url).query
+    )
+    redirect_uri = authorization_query["redirect_uri"][0]
+    expected_state = authorization_query["state"][0]
+
+    async with httpx.AsyncClient() as client:
+        rejected = await client.get(
+            redirect_uri,
+            params={"code": "wrong-code", "state": "wrong-state"},
+        )
+        accepted = await client.get(
+            redirect_uri,
+            params={"code": "valid-code", "state": expected_state},
+        )
+
+    code, code_verifier, returned_redirect_uri = await asyncio.wait_for(
+        flow_task,
+        timeout=1,
+    )
+    assert rejected.status_code == 400
+    assert accepted.status_code == 200
+    assert code == "valid-code"
+    assert code_verifier
+    assert returned_redirect_uri == redirect_uri
 
 @pytest.mark.asyncio
 @respx.mock
@@ -809,6 +1324,126 @@ async def test_do_request_updates_client_headers_after_oauth_refresh(monkeypatch
 
     assert route.calls[0].request.headers["Authorization"] == "Bearer expired-token"
     assert route.calls[1].request.headers["Authorization"] == "Bearer fresh-token"
+
+
+@pytest.mark.asyncio
+async def test_do_request_translates_upstream_timeout():
+    async def timeout_handler(request):
+        raise httpx.ReadTimeout("upstream stalled", request=request)
+
+    transport = httpx.MockTransport(timeout_handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ToolError, match="Domoticz request timed out") as exc_info:
+            await server_module._do_request(
+                client,
+                "GET",
+                "https://domoticz.example/json.htm",
+            )
+
+    assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
+
+
+@pytest.mark.asyncio
+async def test_overview_fetches_independent_data_concurrently(monkeypatch):
+    class DummyClientContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return None
+
+    started = 0
+    active = 0
+    peak_active = 0
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def synchronize(result):
+        nonlocal started, active, peak_active
+        started += 1
+        active += 1
+        peak_active = max(peak_active, active)
+        if started == 6:
+            all_started.set()
+        await release.wait()
+        active -= 1
+        return result
+
+    async def fake_request(client, method, url, **kwargs):
+        payload = {"result": []} if "gethardware" in url else {"version": "test"}
+        return await synchronize(Response(200, json=payload))
+
+    async def fake_cached_data(client, cache, api_url, key_path="result"):
+        return await synchronize([])
+
+    monkeypatch.setattr(server_module, "create_client", lambda: DummyClientContext())
+    monkeypatch.setattr(server_module, "_do_request", fake_request)
+    monkeypatch.setattr(server_module, "_get_cached_data", fake_cached_data)
+
+    overview_task = asyncio.create_task(server_module.get_overview())
+    await asyncio.wait_for(all_started.wait(), timeout=1)
+    release.set()
+    result = json.loads(await asyncio.wait_for(overview_task, timeout=1))
+
+    assert peak_active == 6
+    assert result["result"]["system"]["version"] == "test"
+
+
+@pytest.mark.asyncio
+async def test_overview_cancels_and_drains_siblings_after_failure(monkeypatch):
+    class DummyClientContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return None
+
+    started = 0
+    cancelled = 0
+    all_started = asyncio.Event()
+    block_siblings = asyncio.Event()
+
+    async def wait_or_fail(should_fail=False):
+        nonlocal started, cancelled
+        started += 1
+        if started == 6:
+            all_started.set()
+        await all_started.wait()
+        if should_fail:
+            raise ToolError("overview failed")
+        try:
+            await block_siblings.wait()
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+
+    async def fake_request(client, method, url, **kwargs):
+        await wait_or_fail(should_fail="getversion" in url)
+        return Response(200, json={"result": []})
+
+    async def fake_cached_data(client, cache, api_url, key_path="result"):
+        await wait_or_fail()
+        return []
+
+    monkeypatch.setattr(server_module, "create_client", lambda: DummyClientContext())
+    monkeypatch.setattr(server_module, "_do_request", fake_request)
+    monkeypatch.setattr(server_module, "_get_cached_data", fake_cached_data)
+
+    with pytest.raises(ToolError, match="overview failed"):
+        await asyncio.wait_for(server_module.get_overview(), timeout=1)
+
+    assert cancelled == 5
+
+
+@pytest.mark.asyncio
+async def test_explicit_authentication_requires_a_token(monkeypatch):
+    async def no_token(**kwargs):
+        return None
+
+    monkeypatch.setattr(server_module, "_fetch_oauth_token", no_token)
+
+    with pytest.raises(ToolError, match="No OAuth token was obtained"):
+        await server_module._run_explicit_authentication()
 
 @pytest.mark.asyncio
 @respx.mock
