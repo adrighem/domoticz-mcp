@@ -16,7 +16,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 
 ### Tools (Actions)
 - **Search:** `search_devices_tool` searches devices by name or current data/status text. `search_scripts_tool` searches inside Domoticz event scripts.
-- **Authentication:** `start_oauth_login` starts a short-lived browser login and returns its authorization URL. `get_oauth_login_status` reports when the login is complete.
+- **Authentication:** `start_oauth_login` starts a short-lived login and opens the authorization page locally without returning transaction data. `get_oauth_login_status` reports when the login is complete.
 - **Energy History:** `get_daily_energy_history`, `get_weekly_energy_history`, and `get_monthly_energy_history` read counter graph history for energy, gas, and water meters by `idx` or `name`.
 - **Device Control:** `toggle_switch`, `set_switch_state`, `set_dimmer_level`, `set_temperature_setpoint`, `control_blinds`, `set_color_brightness`, and `set_color_temperature` control supported devices by `idx` or `name`.
 - **Device Management:** `rename_device`, `delete_device`, `create_virtual_sensor`, and `update_device_value` manage devices and virtual sensors.
@@ -24,7 +24,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **User Variables:** `add_user_variable`, `update_user_variable`, and `delete_user_variable` manage Domoticz user variables.
 - **Event Scripts:** `create_event` and `update_event` create or update internal Domoticz event scripts.
 - **System Actions:** `restart_system`, `add_log_message`, `send_notification`, and `set_security_status` call Domoticz system, log, notification, and security APIs.
-- **Advanced:** `call_domoticz_api` executes a generic Domoticz command API call.
+- **Advanced:** `call_domoticz_api` executes a generic Domoticz command API call and returns only its sanitized status/title.
 
 High-impact tools require `confirm=True`: `call_domoticz_api`, `delete_device`, `delete_user_variable`, `update_event`, `restart_system`, and `set_security_status`.
 
@@ -42,8 +42,8 @@ High-impact tools require `confirm=True`: `call_domoticz_api`, `delete_device`, 
 - **`domoticz://logs`** or **`domoticz://log`**: Read the current Domoticz system log.
 - **`domoticz://logs/error`**: Read a filtered view containing only 'Error' level entries from the log.
 - **`domoticz://security`**: Read the current status of the security panel.
-- **`domoticz://settings`**: Read global Domoticz settings and configuration.
-- **`domoticz://hardware`**: Read the configured hardware gateways.
+- **`domoticz://settings`**: Read a reviewed, non-sensitive subset of global display/version settings.
+- **`domoticz://hardware`**: Read only gateway `idx`, name, type, and enabled status. Connection details and integration configuration are omitted.
 - **`domoticz://docs/dzvents_syntax`**: Cheat sheet for writing dzVents automation scripts.
 - **`domoticz://docs/blockly_syntax`**: Syntax rules for Blockly XML automations.
 
@@ -58,6 +58,7 @@ High-impact tools require `confirm=True`: `call_domoticz_api`, `delete_device`, 
 - **Caching:** The server implements a 5-minute TTL cache for devices, scenes, user variables, and rooms to significantly reduce API latency and Domoticz load.
 - **HTTP Lifecycle:** Reuses a shared `httpx.AsyncClient`, applies consistent timeouts, and closes it through the MCP server lifespan.
 - **Bounded Authentication:** MCP requests fail fast with actionable guidance when OAuth needs attention; browser authentication only runs when explicitly requested.
+- **Output Safety:** Domoticz responses are recursively sanitized before crossing the MCP boundary. Credential fields, OAuth transaction data, private endpoints, network addresses, and sensitive free-text patterns are redacted; high-risk configuration resources also use strict allowlists.
 
 ## Architecture
 
@@ -183,18 +184,18 @@ Run the explicit authentication command in an interactive terminal:
 domoticz-mcp --authenticate
 ```
 
-The command opens the authorization URL and waits up to two minutes for the browser callback. After approval, it stores the token with owner-only file permissions and starts the MCP server. Normal MCP requests never launch a browser; if refresh fails, they return an actionable authentication error instead of waiting indefinitely.
+The command opens a local browser and waits up to two minutes for the callback without printing the authorization or callback URL. After approval, it stores the token with owner-only file permissions and starts the MCP server. Normal MCP requests never launch a browser; if refresh fails, they return an actionable authentication error instead of waiting indefinitely.
 
 **Interactive Flow from Codex or another MCP client:**
 
 1. Call `start_oauth_login`.
-2. Open the returned `authorization_url` in your regular browser.
+2. Complete approval in the browser opened on the MCP host.
 3. Call `get_oauth_login_status` with the returned `flow_id` until its status is `complete`.
 4. Retry the original Domoticz operation.
 
-The start tool returns immediately and reuses an existing pending flow, so authentication does not consume the MCP tool timeout. The callback listener binds only to `127.0.0.1`, expires after two minutes, validates OAuth state and PKCE, and never returns tokens or authorization codes through MCP.
+The start tool bounds the local browser launch to five seconds and reuses an existing pending flow, so it does not wait for browser approval. The callback listener binds only to `127.0.0.1`, expires after two minutes, validates OAuth state and PKCE, and never returns authorization URLs, tokens, or authorization codes through MCP.
 
-This tool flow is intended for a local MCP server such as Codex STDIO. The browser must be able to reach the callback on the MCP host; remote containers and remote execution hosts require an explicitly routed callback or the command-line authentication flow on that host.
+This tool flow is intended for a local MCP server such as Codex STDIO. Remote containers and execution hosts should use the command-line authentication flow on a browser-capable host or a securely mounted token file.
 
 **Headless Flow (Docker / Server Environments):**
 In a Docker container, you have two options:

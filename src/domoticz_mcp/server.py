@@ -10,11 +10,12 @@
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from dotenv import load_dotenv
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ import sys
 import json
 import base64
 import hashlib
+import ipaddress
 import urllib.parse
 import secrets
 import webbrowser
@@ -38,6 +40,15 @@ from typing import Annotated, Generic, Literal, NoReturn, Optional, Dict, Any, L
 
 # Load environment variables from a .env file if it exists
 load_dotenv()
+
+# FastMCP derives every tool's argument model from this base. Hiding rejected
+# values prevents validation errors from reflecting sensitive tool inputs.
+ArgModelBase.model_config = ConfigDict(
+    **{
+        **ArgModelBase.model_config,
+        "hide_input_in_errors": True,
+    }
+)
 
 
 class DomoticzError(Exception):
@@ -93,8 +104,9 @@ mcp = FastMCP(
     instructions=(
         "Read domoticz://overview before operating the system. Prefer stable numeric "
         "idx values for devices, scenes, and user variables. If authentication needs "
-        "attention, call start_oauth_login, give its URL to the user, then poll "
-        "get_oauth_login_status. Event scripts use event IDs."
+        "attention, call start_oauth_login, ask the user to complete the browser "
+        "opened on the MCP host, then poll get_oauth_login_status. Event scripts "
+        "use event IDs."
     ),
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     stateless_http=True,
@@ -115,12 +127,323 @@ _global_http_client: Optional[httpx.AsyncClient] = None
 HTTP_TIMEOUT_SECONDS = 30.0
 OAUTH_CALLBACK_TIMEOUT_SECONDS = 120.0
 OAUTH_CALLBACK_SOCKET_TIMEOUT_SECONDS = 0.25
+OAUTH_BROWSER_OPEN_TIMEOUT_SECONDS = 5.0
 OAUTH_STATUS_RETENTION_SECONDS = 300.0
 OAUTH_TERMINAL_STATUS_LIMIT = 4
 AUTHENTICATION_REQUIRED_MESSAGE = (
     "Domoticz authentication requires attention. Call `start_oauth_login`, or run "
     "`domoticz-mcp --authenticate` in an interactive terminal. Alternatively, "
     "configure a valid OAuth token or username/password."
+)
+PUBLIC_REDACTION = "[REDACTED]"
+MAX_PUBLIC_SANITIZE_DEPTH = 20
+HARDWARE_PUBLIC_FIELDS = ("idx", "Name", "Type", "Enabled")
+DEVICE_TOOL_FIELDS = ("idx", "Name", "Data", "Status", "Type", "SubType")
+SETTINGS_PUBLIC_FIELDS = (
+    "status",
+    "title",
+    "version",
+    "Version",
+    "build_time",
+    "BuildTime",
+    "BuildHash",
+    "DzVentsVersion",
+    "PythonVersion",
+    "DashboardType",
+    "DateFormat",
+    "Language",
+    "Metric",
+    "TempUnit",
+    "TempSign",
+    "WindUnit",
+    "WeightUnit",
+    "Currency",
+)
+
+_SENSITIVE_FIELD_WORDS = frozenset({
+    "auth",
+    "authorization",
+    "bearer",
+    "canary",
+    "certificate",
+    "cookie",
+    "credential",
+    "credentials",
+    "csrf",
+    "key",
+    "keys",
+    "login",
+    "nonce",
+    "oauth",
+    "pass",
+    "passphrase",
+    "password",
+    "passwords",
+    "passwd",
+    "pin",
+    "pkce",
+    "private",
+    "pwd",
+    "salt",
+    "secret",
+    "secrets",
+    "session",
+    "signature",
+    "token",
+    "tokens",
+    "user",
+    "username",
+    "xsrf",
+})
+_NETWORK_FIELD_WORDS = frozenset({
+    "address",
+    "addresses",
+    "broker",
+    "endpoint",
+    "endpoints",
+    "host",
+    "hostname",
+    "ip",
+    "network",
+    "networks",
+    "port",
+    "proxy",
+    "uri",
+    "url",
+})
+_SENSITIVE_FIELD_FRAGMENTS = (
+    "accesskey",
+    "accesstoken",
+    "apikey",
+    "apisecret",
+    "authorizationcode",
+    "authcode",
+    "bearertoken",
+    "clientid",
+    "clientsecret",
+    "consumersecret",
+    "codechallenge",
+    "codeverifier",
+    "flowid",
+    "idtoken",
+    "linkid",
+    "oauthstate",
+    "pairingkey",
+    "pincode",
+    "privatekey",
+    "proxyauthorization",
+    "refreshtoken",
+    "remoteaccess",
+    "seccode",
+    "securitycode",
+    "sessionid",
+    "sharedsecret",
+    "secretkey",
+    "sshprivatekey",
+)
+_SENSITIVE_COMPACT_PREFIXES = (
+    "authorization",
+    "broker",
+    "callback",
+    "consumer",
+    "domoticz",
+    "homeassistant",
+    "http",
+    "https",
+    "mqtt",
+    "oauth",
+    "proxy",
+    "redirect",
+    "remote",
+    "secret",
+)
+_SENSITIVE_COMPACT_TAILS = frozenset({
+    "address",
+    "broker",
+    "credential",
+    "endpoint",
+    "host",
+    "hostname",
+    "ip",
+    "key",
+    "pass",
+    "passphrase",
+    "password",
+    "port",
+    "secret",
+    "server",
+    "token",
+    "uri",
+    "url",
+    "user",
+    "username",
+})
+_SENSITIVE_COMPACT_SUFFIXES = (
+    "bearertoken",
+    "brokeraddress",
+    "clientsecret",
+    "credential",
+    "endpoint",
+    "hostname",
+    "idtoken",
+    "ipaddress",
+    "oauthstate",
+    "pairingkey",
+    "passphrase",
+    "password",
+    "passwd",
+    "privatekey",
+    "refreshtoken",
+    "sharedsecret",
+    "token",
+    "username",
+)
+_OAUTH_TRANSACTION_FIELDS = frozenset({
+    "authorizationcode",
+    "authcode",
+    "canary",
+    "challenge",
+    "code",
+    "codechallenge",
+    "codeverifier",
+    "flowid",
+    "nonce",
+    "oauthstate",
+    "pkce",
+    "state",
+    "verifier",
+})
+_OAUTH_CONTEXT_FIELDS = frozenset({
+    "authentication",
+    "authorization",
+    "loginflow",
+    "oauth",
+    "openid",
+    "pkce",
+    "sso",
+    "transaction",
+})
+_SENSITIVE_DESCRIPTOR_FIELDS = frozenset({
+    "key",
+    "label",
+    "name",
+    "parameter",
+    "parametername",
+    "property",
+    "propertyname",
+    "setting",
+    "settingname",
+    "variable",
+    "variablename",
+    "vname",
+})
+_SENSITIVE_VALUE_FIELDS = frozenset({
+    "content",
+    "data",
+    "svalue",
+    "value",
+    "vvalue",
+})
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"""(?ix)
+    (?<![A-Za-z0-9])
+    (?P<label>
+        ["'][^"'=:\r\n]{1,80}["']
+        |
+        [A-Za-z][A-Za-z0-9_.-]*(?:[ \t]+[A-Za-z0-9_.-]+){0,3}
+    )
+    (?P<separator>\s*[:=]\s*)
+    (?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)
+    """
+)
+_AUTHORIZATION_VALUE_RE = re.compile(
+    r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+"
+)
+_ENDPOINT_RE = re.compile(
+    r"(?i)\b[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"']+"
+)
+_SCHEMELESS_ENDPOINT_RE = re.compile(
+    r"""(?ix)
+    (?<![\w.-])
+    (?:
+        (?:
+            localhost
+            |
+            [a-z](?:[a-z0-9-]{0,61}[a-z0-9])?
+            (?:\.[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)+
+        )
+        :\d{1,5}(?:/[^\s<>"']*)?
+        |
+        (?:
+            [a-z](?:[a-z0-9-]{0,61}[a-z0-9])?
+        )
+        :
+        (?:
+            22|25|53|80|110|143|443|465|587|993|995
+            |
+            [1-9]\d{3,4}
+        )
+        (?:/[^\s<>"']*)?
+        |
+        (?:
+            localhost
+            |
+            [a-z](?:[a-z0-9-]{0,61}[a-z0-9])?
+            (?:\.[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)+
+        )
+        /[^\s<>"']+
+    )
+    """
+)
+_DNS_HOST_RE = re.compile(
+    r"(?i)(?<![\w@/.-])"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?![\w/.-])"
+)
+_CONTEXTUAL_HOST_RE = re.compile(
+    r"""(?ix)
+    \b(?P<prefix>
+        (?:
+            connect(?:ed|ing)?\s+to
+            |
+            (?:host(?:name)?|server|broker|endpoint|address)
+            (?:\s+(?:is|at))?
+        )
+        \s+
+    )
+    (?P<host>[a-z][a-z0-9-]{0,62})
+    (?![\w.-])
+    """
+)
+_LOCAL_HOST_RE = re.compile(
+    r"(?i)(?<![\w.-])(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*"
+    r"\.(?:home|internal|lan|local))(?::\d{1,5})?(?![\w.-])"
+)
+_IPV4_RE = re.compile(
+    r"(?<![\w.])(?P<host>(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?![\w.])"
+)
+_BRACKETED_IPV6_RE = re.compile(
+    r"(?<![0-9A-Fa-f:])\[(?P<host>[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.-]+)?)\]"
+    r"(?::\d{1,5})?"
+)
+_BARE_IPV6_RE = re.compile(
+    r"(?<![0-9A-Fa-f:])"
+    r"(?P<host>(?:[0-9A-Fa-f]{0,4}:){2,7}"
+    r"(?:[0-9A-Fa-f]{0,4}|(?:\d{1,3}\.){3}\d{1,3})"
+    r"(?:%[A-Za-z0-9_.-]+)?)"
+    r"(?![0-9A-Fa-f:])"
+)
+_MAC_ADDRESS_RE = re.compile(
+    r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f])"
+)
+_JWT_RE = re.compile(
+    r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+)
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?"
+    r"-----END [^-\r\n]*PRIVATE KEY-----",
+    re.DOTALL,
 )
 
 # Cache settings
@@ -132,9 +455,9 @@ _plans_cache = {"data": None, "timestamp": 0, "generation": 0}
 
 
 class DomoticzItem(BaseModel):
-    """A Domoticz object while preserving fields added by the upstream API."""
+    """Reviewed public fields for a Domoticz device."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     idx: int | str = Field(description="Numeric Domoticz device idx")
     Name: str = Field(description="Configured device name")
@@ -147,7 +470,7 @@ class DomoticzItem(BaseModel):
 class ScriptSearchMatch(BaseModel):
     """A matching Domoticz event script."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: int | str = Field(description="Canonical Domoticz event ID")
     idx: int | str = Field(description="Compatibility alias for the event ID")
@@ -157,24 +480,27 @@ class ScriptSearchMatch(BaseModel):
 class DomoticzToolResult(BaseModel):
     """A successful Domoticz command response."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     status: str = Field(description="Status returned by Domoticz, normally OK")
     title: str | None = Field(default=None, description="Optional Domoticz response title")
 
 
 class OAuthLoginStartResult(BaseModel):
-    """Safe details needed to continue a browser-based OAuth login."""
+    """Credential-free details for a locally opened browser login."""
+
+    model_config = ConfigDict(extra="forbid")
 
     status: Literal["pending"] = Field(description="Login flow state")
     flow_id: str = Field(description="Opaque identifier used to check this login flow")
-    authorization_url: str = Field(description="URL the user must open to authorize Domoticz")
     expires_at: str = Field(description="UTC time when this login flow expires")
     message: str = Field(description="Next action for the user or agent")
 
 
 class OAuthLoginStatusResult(BaseModel):
     """Credential-free status for a browser-based OAuth login."""
+
+    model_config = ConfigDict(extra="forbid")
 
     status: Literal["pending", "complete", "expired", "error"] = Field(
         description="Current login flow state"
@@ -197,9 +523,11 @@ class _OAuthLoginFlow:
     expires_monotonic: float
     callback_server: HTTPServer
     callback_future: asyncio.Future[str]
+    browser_future: asyncio.Future[bool]
     event_loop: asyncio.AbstractEventLoop
     callback_claimed: threading.Event = field(default_factory=threading.Event)
     callback_thread: threading.Thread | None = None
+    browser_thread: threading.Thread | None = None
     supervisor_task: asyncio.Task[None] | None = None
     authorization_code: str | None = None
     listener_stop_task: asyncio.Task[None] | None = None
@@ -226,6 +554,8 @@ ResultItem = TypeVar("ResultItem", bound=BaseModel)
 class PaginatedToolResult(BaseModel, Generic[ResultItem]):
     """A page of MCP tool results with explicit continuation metadata."""
 
+    model_config = ConfigDict(extra="forbid")
+
     status: str = Field(description="Status returned by Domoticz, normally OK")
     result: list[ResultItem] = Field(description="Results in this page")
     total_count: int = Field(ge=0, description="Total number of matching results")
@@ -243,7 +573,7 @@ class PaginatedToolResult(BaseModel, Generic[ResultItem]):
 class EnergyHistorySummary(BaseModel):
     """Aggregate statistics for normalized energy history."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     samples: int = Field(ge=0, description="Number of normalized history samples")
     category: str = Field(description="Energy, gas, water, or storage category")
@@ -255,7 +585,7 @@ class EnergyHistorySummary(BaseModel):
 class EnergyHistorySample(BaseModel):
     """A normalized Domoticz graph sample."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     d: str | None = Field(default=None, description="Domoticz sample date or timestamp")
     numeric: dict[str, float] | None = Field(default=None, description="Numeric forms of upstream values")
@@ -323,14 +653,282 @@ def _invalidate_caches(*caches: Dict[str, Any]) -> None:
         cache["timestamp"] = 0
 
 
+def _field_words(field_name: str) -> tuple[str, ...]:
+    """Split a JSON field name across punctuation and camel-case boundaries."""
+    expanded = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", field_name)
+    expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", expanded)
+    return tuple(
+        part.casefold()
+        for part in re.split(r"[^A-Za-z0-9]+", expanded)
+        if part
+    )
+
+
+def _is_sensitive_public_field(field_name: str) -> bool:
+    """Return whether a field can carry credentials or private network details."""
+    words = _field_words(field_name)
+    word_set = set(words)
+    normalized = "".join(words)
+    semantic_normalized = normalized.rstrip("0123456789")
+    if word_set & (_SENSITIVE_FIELD_WORDS | _NETWORK_FIELD_WORDS):
+        return True
+    if semantic_normalized in {
+        "code",
+        "state",
+    } | _SENSITIVE_FIELD_WORDS | _NETWORK_FIELD_WORDS:
+        return True
+    if any(
+        fragment in semantic_normalized
+        for fragment in _SENSITIVE_FIELD_FRAGMENTS
+    ):
+        return True
+    if any(
+        semantic_normalized.endswith(suffix)
+        for suffix in _SENSITIVE_COMPACT_SUFFIXES
+    ):
+        return True
+    if any(
+        semantic_normalized.startswith(prefix)
+        and semantic_normalized.removeprefix(prefix) in _SENSITIVE_COMPACT_TAILS
+        for prefix in _SENSITIVE_COMPACT_PREFIXES
+    ):
+        return True
+    if normalized in {"connection", "gateway", "remote", "server"}:
+        return True
+    if any(
+        normalized.endswith(suffix)
+        for suffix in (
+            "serveraddress",
+            "serverhost",
+            "serverip",
+            "serverport",
+            "serveruri",
+            "serverurl",
+            "remoteaddress",
+            "remotehost",
+            "remoteport",
+            "remoteuri",
+            "remoteurl",
+        )
+    ):
+        return True
+    return normalized == "extra" or re.fullmatch(
+        r"(?:mode|strparam)\d+",
+        normalized,
+    ) is not None
+
+
+def _redact_assignment(match: re.Match[str]) -> str:
+    """Replace a labeled credential value without retaining any part of it."""
+    label = match.group("label")
+    unquoted_label = label.strip("\"'")
+    normalized = "".join(_field_words(unquoted_label))
+    if (
+        not _is_sensitive_public_field(unquoted_label)
+        and normalized not in _OAUTH_TRANSACTION_FIELDS
+    ):
+        return match.group(0)
+
+    value = match.group("value")
+    quote = value[0] if value.startswith(("\"", "'")) else ""
+    return (
+        f"{label}{match.group('separator')}"
+        f"{quote}{PUBLIC_REDACTION}{quote}"
+    )
+
+
+def _redact_ip_match(match: re.Match[str]) -> str:
+    """Redact a syntactically valid IP address while leaving version strings alone."""
+    try:
+        ipaddress.ip_address(match.group("host"))
+    except ValueError:
+        return match.group(0)
+    return PUBLIC_REDACTION
+
+
+def _redact_contextual_host(match: re.Match[str]) -> str:
+    """Preserve surrounding prose while removing a short internal hostname."""
+    return f"{match.group('prefix')}{PUBLIC_REDACTION}"
+
+
+def _sanitize_public_text(
+    value: str,
+    *,
+    _depth: int = 0,
+    _auth_context: bool = False,
+) -> str:
+    """Remove credential assignments, authorization values, and network endpoints."""
+    if value == PUBLIC_REDACTION:
+        return value
+    if _depth >= MAX_PUBLIC_SANITIZE_DEPTH:
+        return PUBLIC_REDACTION
+
+    stripped = value.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            embedded = json.loads(stripped)
+        except (TypeError, ValueError):
+            embedded = None
+        if isinstance(embedded, (dict, list)):
+            sanitized_embedded = _sanitize_public_data(
+                embedded,
+                _depth=_depth + 1,
+                _auth_context=_auth_context,
+            )
+            if sanitized_embedded != embedded:
+                return json.dumps(sanitized_embedded, separators=(",", ":"))
+
+    sanitized = _CREDENTIAL_ASSIGNMENT_RE.sub(_redact_assignment, value)
+    sanitized = _AUTHORIZATION_VALUE_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _JWT_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _PEM_PRIVATE_KEY_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _ENDPOINT_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _SCHEMELESS_ENDPOINT_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _CONTEXTUAL_HOST_RE.sub(_redact_contextual_host, sanitized)
+    sanitized = _LOCAL_HOST_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _DNS_HOST_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _IPV4_RE.sub(_redact_ip_match, sanitized)
+    sanitized = _BRACKETED_IPV6_RE.sub(_redact_ip_match, sanitized)
+    sanitized = _BARE_IPV6_RE.sub(_redact_ip_match, sanitized)
+    sanitized = _MAC_ADDRESS_RE.sub(PUBLIC_REDACTION, sanitized)
+
+    candidate = sanitized.strip()
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return sanitized
+    return PUBLIC_REDACTION
+
+
+def _next_redacted_mapping_key(sanitized: Dict[Any, Any]) -> str:
+    """Return a collision-free placeholder for a secret-bearing mapping key."""
+    if PUBLIC_REDACTION not in sanitized:
+        return PUBLIC_REDACTION
+    suffix = max(2, len(sanitized) + 1)
+    while f"{PUBLIC_REDACTION} {suffix}" in sanitized:
+        suffix += 1
+    return f"{PUBLIC_REDACTION} {suffix}"
+
+
+def _sanitize_public_data(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _auth_context: bool = False,
+) -> Any:
+    """Recursively return a non-mutating, MCP-safe copy of upstream data."""
+    if _depth >= MAX_PUBLIC_SANITIZE_DEPTH:
+        return PUBLIC_REDACTION
+    if isinstance(value, dict):
+        descriptor_is_sensitive = any(
+            isinstance(field_value, str)
+            and "".join(_field_words(str(field_name))) in _SENSITIVE_DESCRIPTOR_FIELDS
+            and _is_sensitive_public_field(field_value)
+            for field_name, field_value in value.items()
+        )
+        normalized_fields = {
+            "".join(_field_words(str(field_name)))
+            for field_name in value
+        }
+        auth_context = _auth_context or bool(
+            normalized_fields & _OAUTH_CONTEXT_FIELDS
+        ) or {"state", "code"} <= normalized_fields or any(
+            any(
+                marker in normalized_field
+                for marker in ("auth", "oauth", "pkce", "token", "verifier", "challenge")
+            )
+            for normalized_field in normalized_fields
+        )
+        sanitized: Dict[Any, Any] = {}
+        for field_name, field_value in value.items():
+            field_text = str(field_name)
+            if isinstance(field_name, str):
+                sanitized_field_text = _sanitize_public_text(
+                    field_name,
+                    _depth=_depth + 1,
+                )
+                if sanitized_field_text != field_name:
+                    sanitized[_next_redacted_mapping_key(sanitized)] = (
+                        PUBLIC_REDACTION
+                    )
+                    continue
+            normalized = "".join(_field_words(field_text))
+            sensitive_value_field = (
+                descriptor_is_sensitive
+                and (
+                    normalized in _SENSITIVE_VALUE_FIELDS
+                    or any(
+                        normalized.endswith(value_field)
+                        for value_field in _SENSITIVE_VALUE_FIELDS
+                    )
+                )
+            )
+            sensitive_auth_field = (
+                auth_context and normalized in _OAUTH_TRANSACTION_FIELDS
+            )
+            if (
+                _is_sensitive_public_field(field_text)
+                or sensitive_value_field
+                or sensitive_auth_field
+            ):
+                sanitized[field_name] = PUBLIC_REDACTION
+            else:
+                sanitized[field_name] = _sanitize_public_data(
+                    field_value,
+                    _depth=_depth + 1,
+                    _auth_context=(
+                        auth_context
+                        or normalized in _OAUTH_CONTEXT_FIELDS
+                    ),
+                )
+        return sanitized
+    if isinstance(value, list):
+        return [
+            _sanitize_public_data(
+                item,
+                _depth=_depth + 1,
+                _auth_context=_auth_context,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _sanitize_public_data(
+                item,
+                _depth=_depth + 1,
+                _auth_context=_auth_context,
+            )
+            for item in value
+        )
+    if isinstance(value, str):
+        return _sanitize_public_text(
+            value,
+            _depth=_depth,
+            _auth_context=_auth_context,
+        )
+    return value
+
+
+def _project_public_fields(
+    payload: Dict[str, Any],
+    fields: tuple[str, ...],
+) -> Dict[str, Any]:
+    """Project a payload to an explicitly reviewed set of public fields."""
+    return {
+        field_name: payload[field_name]
+        for field_name in fields
+        if field_name in payload
+    }
+
+
 def _format_response(data: Dict[str, Any]) -> str:
     """Format a dictionary as a JSON string response."""
-    return json.dumps(data)
+    return json.dumps(_sanitize_public_data(data))
 
 
 def _error_response(message: str, status: str = "error") -> NoReturn:
     """Raise a protocol-visible MCP tool error."""
-    raise ToolError(message)
+    raise ToolError(_sanitize_public_text(message))
 
 
 def _confirmation_required(action: str) -> NoReturn:
@@ -342,8 +940,10 @@ def _domoticz_payload(response: httpx.Response, action: str) -> Dict[str, Any]:
     """Parse and validate a JSON object returned by Domoticz."""
     try:
         payload = response.json()
-    except ValueError as exc:
-        raise ToolError(f"{action} failed: Domoticz returned invalid JSON.") from exc
+    except ValueError:
+        raise ToolError(
+            f"{action} failed: Domoticz returned invalid JSON."
+        ) from None
 
     if not isinstance(payload, dict):
         raise ToolError(f"{action} failed: Domoticz returned an unexpected response.")
@@ -352,21 +952,30 @@ def _domoticz_payload(response: httpx.Response, action: str) -> Dict[str, Any]:
 
 
 def _validated_success_payload(payload: Dict[str, Any], action: str) -> Dict[str, Any]:
-    """Require a successful Domoticz status while allowing status-less reads."""
-    raw_status = payload.get("status")
+    """Sanitize upstream data and require a successful Domoticz status."""
+    safe_payload = _sanitize_public_data(payload)
+    raw_status = safe_payload.get("status")
     status = "OK" if raw_status is None else str(raw_status)
     if status.upper() not in {"OK", "SUCCESS"}:
-        detail = payload.get("message") or payload.get("title") or payload.get("error")
-        suffix = f": {detail}" if detail else f" with status {status}"
-        raise ToolError(f"{action} failed{suffix}.")
+        raise ToolError(f"{action} failed.")
 
-    payload["status"] = status
-    return payload
+    safe_payload["status"] = status
+    return safe_payload
 
 
 def _tool_result(response: httpx.Response, action: str) -> DomoticzToolResult:
     """Convert a successful Domoticz response into structured MCP output."""
-    return DomoticzToolResult.model_validate(_domoticz_payload(response, action))
+    try:
+        return DomoticzToolResult.model_validate(
+            _project_public_fields(
+                _domoticz_payload(response, action),
+                ("status", "title"),
+            )
+        )
+    except ValidationError:
+        raise ToolError(
+            f"{action} failed: Domoticz returned an unexpected response."
+        ) from None
 
 
 async def _mutation_result(
@@ -398,12 +1007,19 @@ def _structured_json_result(
     """Convert an internal JSON response into a typed MCP result."""
     try:
         payload = json.loads(response_text)
-    except (TypeError, ValueError) as exc:
-        raise ToolError(f"{action} failed: internal response was invalid JSON.") from exc
+    except (TypeError, ValueError):
+        raise ToolError(
+            f"{action} failed: internal response was invalid JSON."
+        ) from None
 
     if not isinstance(payload, dict):
         raise ToolError(f"{action} failed: internal response was not an object.")
-    return model.model_validate(_validated_success_payload(payload, action))
+    try:
+        return model.model_validate(_validated_success_payload(payload, action))
+    except ValidationError:
+        raise ToolError(
+            f"{action} failed: Domoticz returned an unexpected response."
+        ) from None
 
 
 def _command_url(param: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -428,8 +1044,8 @@ def _load_token_data() -> Dict[str, Any] | None:
             token_data = json.load(token_stream)
     except ToolError:
         raise
-    except (OSError, ValueError) as exc:
-        raise ToolError(f"Failed to load the Domoticz OAuth token file: {exc}") from exc
+    except (OSError, ValueError):
+        raise ToolError("Failed to load the Domoticz OAuth token file.") from None
     if not isinstance(token_data, dict):
         raise ToolError("Failed to load the Domoticz OAuth token file: expected a JSON object.")
     return token_data
@@ -481,7 +1097,7 @@ def _build_oauth_authorization_url(
     state: str,
     code_challenge: str,
 ) -> str:
-    """Build a Domoticz authorization URL without including any secret."""
+    """Build the internal Domoticz authorization transaction URL."""
     return (
         f"{DOMOTICZ_BASE_URL}/oauth2/v1/authorize?"
         + urllib.parse.urlencode(
@@ -531,7 +1147,13 @@ class _QuietOAuthHTTPServer(HTTPServer):
 
 def _record_oauth_callback(
     flow: _OAuthLoginFlow,
-    signal: Literal["authorized", "oauth_error", "listener_error", "shutdown"],
+    signal: Literal[
+        "authorized",
+        "browser_error",
+        "oauth_error",
+        "listener_error",
+        "shutdown",
+    ],
     authorization_code: str | None = None,
 ) -> None:
     """Record a callback result on the owning asyncio event loop."""
@@ -541,6 +1163,38 @@ def _record_oauth_callback(
         if signal == "authorized":
             flow.authorization_code = authorization_code
         flow.callback_future.set_result(signal)
+
+
+def _complete_oauth_browser_launch(
+    flow: _OAuthLoginFlow,
+    opened: bool,
+) -> None:
+    """Record only the browser launch outcome, never its transaction URL."""
+    with _oauth_login_flow_lock:
+        if not flow.browser_future.done():
+            flow.browser_future.set_result(opened)
+        if (
+            not opened
+            and _active_oauth_login_flow is flow
+            and not flow.callback_future.done()
+        ):
+            flow.callback_future.set_result("browser_error")
+
+
+def _launch_oauth_browser(flow: _OAuthLoginFlow) -> None:
+    """Launch the browser on a daemon thread that cannot block server shutdown."""
+    try:
+        opened = bool(webbrowser.open(flow.authorization_url))
+    except BaseException:
+        opened = False
+    try:
+        flow.event_loop.call_soon_threadsafe(
+            _complete_oauth_browser_launch,
+            flow,
+            opened,
+        )
+    except RuntimeError:
+        pass
 
 
 def _serve_oauth_callback(flow: _OAuthLoginFlow) -> None:
@@ -673,12 +1327,19 @@ def _create_oauth_login_flow() -> _OAuthLoginFlow:
         expires_monotonic=time.monotonic() + OAUTH_CALLBACK_TIMEOUT_SECONDS,
         callback_server=callback_server,
         callback_future=event_loop.create_future(),
+        browser_future=event_loop.create_future(),
         event_loop=event_loop,
     )
     flow.callback_thread = threading.Thread(
         target=_serve_oauth_callback,
         args=(flow,),
         name="domoticz-oauth-callback",
+        daemon=True,
+    )
+    flow.browser_thread = threading.Thread(
+        target=_launch_oauth_browser,
+        args=(flow,),
+        name="domoticz-oauth-browser",
         daemon=True,
     )
     return flow
@@ -765,6 +1426,12 @@ async def _supervise_oauth_login_flow(flow: _OAuthLoginFlow) -> None:
                 "Domoticz did not authorize the request. Start a new login flow."
             )
             return
+        if signal == "browser_error":
+            terminal_status = "error"
+            terminal_message = (
+                "The local browser could not be opened. Start a new login flow."
+            )
+            return
         if signal == "listener_error":
             terminal_status = "error"
             terminal_message = (
@@ -836,8 +1503,39 @@ async def _supervise_oauth_login_flow(flow: _OAuthLoginFlow) -> None:
             )
 
 
+async def _open_oauth_browser(flow: _OAuthLoginFlow) -> None:
+    """Open transaction data locally without returning or printing it."""
+    if flow.browser_thread is None:
+        raise ToolError(
+            "Could not open a local browser for Domoticz authentication."
+        )
+    try:
+        flow.browser_thread.start()
+    except RuntimeError:
+        _complete_oauth_browser_launch(flow, False)
+
+    try:
+        opened = await asyncio.wait_for(
+            asyncio.shield(flow.browser_future),
+            timeout=OAUTH_BROWSER_OPEN_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return
+    except asyncio.CancelledError:
+        raise
+    if opened:
+        return
+
+    if flow.supervisor_task is not None:
+        await asyncio.gather(flow.supervisor_task, return_exceptions=True)
+    raise ToolError(
+        "Could not open a local browser for Domoticz authentication. Run "
+        "`domoticz-mcp --authenticate` on the MCP host or configure a token."
+    )
+
+
 async def _start_oauth_login_flow() -> OAuthLoginStartResult:
-    """Start or reuse the one active non-blocking OAuth login flow."""
+    """Start or reuse the one active locally opened OAuth login flow."""
     global _active_oauth_login_flow
     if not DOMOTICZ_CLIENT_ID:
         raise ToolError(
@@ -856,11 +1554,10 @@ async def _start_oauth_login_flow() -> OAuthLoginStartResult:
                 return OAuthLoginStartResult(
                     status="pending",
                     flow_id=active_flow.flow_id,
-                    authorization_url=active_flow.authorization_url,
                     expires_at=active_flow.expires_at,
                     message=(
-                        "Open the authorization URL, then call "
-                        "get_oauth_login_status with this flow_id."
+                        "Complete authorization in the browser opened on the MCP "
+                        "host, then call get_oauth_login_status with this flow_id."
                     ),
                 )
 
@@ -872,14 +1569,14 @@ async def _start_oauth_login_flow() -> OAuthLoginStartResult:
             _supervise_oauth_login_flow(flow),
             name=f"domoticz-oauth-login-{flow.flow_id}",
         )
+        await _open_oauth_browser(flow)
         return OAuthLoginStartResult(
             status="pending",
             flow_id=flow.flow_id,
-            authorization_url=flow.authorization_url,
             expires_at=flow.expires_at,
             message=(
-                "Open the authorization URL, then call get_oauth_login_status "
-                "with this flow_id."
+                "Complete authorization in the browser opened on the MCP host, "
+                "then call get_oauth_login_status with this flow_id."
             ),
         )
 
@@ -896,7 +1593,7 @@ def _get_oauth_login_flow_status(flow_id: str) -> OAuthLoginStatusResult:
             message = (
                 "Completing the OAuth token exchange."
                 if flow.callback_future.done()
-                else "Waiting for the user to open and approve the authorization URL."
+                else "Waiting for approval in the browser opened on the MCP host."
             )
             return OAuthLoginStatusResult(
                 status="pending",
@@ -992,18 +1689,23 @@ def _do_interactive_oauth_flow(
         code_challenge,
     )
 
-    sys.stderr.write("\n==========================================================\n")
-    sys.stderr.write("Authentication required for Domoticz MCP Server.\n")
-    sys.stderr.write("Please open this URL in your browser to authenticate:\n\n")
-    sys.stderr.write(f"{auth_url}\n\n")
-    sys.stderr.write(f"Waiting for authentication on {redirect_uri}...\n")
-    sys.stderr.write("==========================================================\n\n")
+    sys.stderr.write(
+        "Domoticz authentication requires approval in a local browser.\n"
+    )
     sys.stderr.flush()
 
     try:
-        webbrowser.open(auth_url)
+        opened = webbrowser.open(auth_url)
     except Exception:
-        pass
+        opened = False
+    if not opened:
+        callback_server.server_close()
+        sys.stderr.write(
+            "Could not open a local browser. Run authentication on a host with "
+            "browser access or configure a token.\n"
+        )
+        sys.stderr.flush()
+        return None, None, None
 
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     try:
@@ -1141,12 +1843,14 @@ async def _fetch_oauth_token(
                     raise ToolError(AUTHENTICATION_REQUIRED_MESSAGE)
         except ToolError:
             raise
-        except httpx.TimeoutException as exc:
+        except httpx.TimeoutException:
             raise ToolError(
                 "Domoticz OAuth request timed out. Check connectivity and authentication settings."
-            ) from exc
+            ) from None
         except (httpx.HTTPError, ValueError) as exc:
-            raise ToolError(f"{AUTHENTICATION_REQUIRED_MESSAGE} ({type(exc).__name__})") from exc
+            raise ToolError(
+                f"{AUTHENTICATION_REQUIRED_MESSAGE} ({type(exc).__name__})"
+            ) from None
 
     if interactive_context is None:
         raise ToolError(AUTHENTICATION_REQUIRED_MESSAGE)
@@ -1182,12 +1886,12 @@ async def _fetch_oauth_token(
                     token_response.json(),
                     existing_token_data,
                 )
-        except httpx.TimeoutException as exc:
-            raise ToolError("Domoticz OAuth token exchange timed out.") from exc
+        except httpx.TimeoutException:
+            raise ToolError("Domoticz OAuth token exchange timed out.") from None
         except (httpx.HTTPError, ValueError) as exc:
             raise ToolError(
                 f"Domoticz OAuth token exchange failed ({type(exc).__name__})."
-            ) from exc
+            ) from None
 
 async def _do_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
     """Perform a request with a single retry on 401 Unauthorized to handle expired tokens."""
@@ -1213,18 +1917,20 @@ async def _do_request(client: httpx.AsyncClient, method: str, url: str, **kwargs
 
         resp.raise_for_status()
         return resp
-    except httpx.TimeoutException as e:
+    except httpx.TimeoutException:
         raise ToolError(
             "Domoticz request timed out. Check the Domoticz connection and try again."
-        ) from e
+        ) from None
     except httpx.RequestError as e:
         raise ToolError(
             f"Could not connect to Domoticz ({type(e).__name__}). Check the configured URL."
-        ) from e
+        ) from None
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            raise ToolError(AUTHENTICATION_REQUIRED_MESSAGE) from e
-        raise e
+            raise ToolError(AUTHENTICATION_REQUIRED_MESSAGE) from None
+        raise ToolError(
+            f"Domoticz request failed with HTTP {e.response.status_code}."
+        ) from None
 
 # Custom AsyncClient wrapper that ensures the token is added
 class DomoticzClient:
@@ -1581,7 +2287,9 @@ def _energy_history_range(period: str) -> str:
 
 
 def _normalize_energy_history_row(row: Dict[str, Any], category: str) -> Dict[str, Any]:
-    normalized = dict(row)
+    normalized: Dict[str, Any] = {}
+    if "d" in row:
+        normalized["d"] = row["d"]
     numeric_fields = {}
 
     for key, value in row.items():
@@ -1708,7 +2416,10 @@ async def get_overview(detail_level: str = "minimal") -> str:
         sys_info = _domoticz_payload(resp, "Reading Domoticz version")
         hardware = _domoticz_payload(hw_resp, "Reading hardware").get("result", [])
         overview = {
-            "system": {"version": sys_info.get("version"), "build_time": sys_info.get("build_time"), "domoticz_url": DOMOTICZ_BASE_URL},
+            "system": {
+                "version": sys_info.get("version"),
+                "build_time": sys_info.get("build_time"),
+            },
             "counts": {"devices": len(devices), "scenes_and_groups": len(scenes), "user_variables": len(vars), "rooms_plans": len(plans), "hardware_gateways": len(hardware)}
         }
         if detail_level != "minimal":
@@ -1745,7 +2456,14 @@ async def get_device(idx: int | None = None, name: str | None = None) -> str:
         resolved_idx = await _resolve_device_idx(client, idx, name)
         if not resolved_idx: return _error_response("Device not found")
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={resolved_idx}")
-        return _json_response_text(response, "Reading device")
+        data = _domoticz_payload(response, "Reading device")
+        if isinstance(data.get("result"), list):
+            data["result"] = [
+                _simplify_device(device)
+                for device in data["result"]
+                if isinstance(device, dict)
+            ]
+        return json.dumps(data)
 
 async def get_scenes() -> str:
     """Internal: Get all scenes."""
@@ -1844,16 +2562,27 @@ async def get_camera_snapshot(idx: int) -> str:
         return json.dumps({"status": "OK", "result": base64.b64encode(response.content).decode("utf-8")})
 
 async def get_hardware() -> str:
-    """Internal: Get hardware gateways."""
+    """Internal: Get only reviewed, non-sensitive hardware metadata."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=gethardware")
-        return _json_response_text(response, "Reading hardware")
+        data = _domoticz_payload(response, "Reading hardware")
+        hardware = data.get("result", [])
+        if not isinstance(hardware, list):
+            _error_response("Reading hardware failed: result was not a list.")
+        public_data = _project_public_fields(data, ("status", "title"))
+        public_data["result"] = [
+            _project_public_fields(item, HARDWARE_PUBLIC_FIELDS)
+            for item in hardware
+            if isinstance(item, dict)
+        ]
+        return json.dumps(public_data)
 
 async def get_settings() -> str:
-    """Internal: Get settings."""
+    """Internal: Get only reviewed, non-sensitive global settings."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getsettings")
-        return _json_response_text(response, "Reading Domoticz settings")
+        data = _domoticz_payload(response, "Reading Domoticz settings")
+        return json.dumps(_project_public_fields(data, SETTINGS_PUBLIC_FIELDS))
 
 async def get_connectivity_report(hours: int = 24) -> str:
     """Internal: Get unresponsive devices."""
@@ -1920,7 +2649,14 @@ async def search_devices(query: str, offset: int = 0, limit: int | None = 50) ->
     """Internal: Search devices."""
     async with create_client() as client:
         devices = await _get_cached_data(client, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
-        results = [d for d in devices if query.lower() in d.get("Name", "").lower() or query.lower() in d.get("Data", "").lower()]
+        results = [
+            _project_public_fields(device, DEVICE_TOOL_FIELDS)
+            for device in devices
+            if (
+                query.lower() in device.get("Name", "").lower()
+                or query.lower() in device.get("Data", "").lower()
+            )
+        ]
         return json.dumps(_paginated_payload(results, offset, limit))
 
 # --- Resources ---
@@ -2174,7 +2910,13 @@ async def get_security_resource() -> str:
     """Status: security panel arming state."""
     async with create_client() as client:
         response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getsecstatus")
-        return _json_response_text(response, "Reading security status")
+        data = _domoticz_payload(response, "Reading security status")
+        return json.dumps(
+            _project_public_fields(
+                data,
+                ("status", "title", "secstatus", "secondelay"),
+            )
+        )
 
 @mcp.resource(
     "domoticz://settings",
@@ -2217,7 +2959,7 @@ async def get_blockly_docs() -> str:
     ),
 )
 async def start_oauth_login() -> OAuthLoginStartResult:
-    """Start or reuse a bounded browser login. Open the returned URL, then poll get_oauth_login_status."""
+    """Start or reuse a bounded login in a local browser, then poll get_oauth_login_status."""
     return await _start_oauth_login_flow()
 
 

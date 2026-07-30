@@ -627,9 +627,15 @@ def test_dns_rebinding_protection_enabled_rejects():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_get_overview():
+async def test_get_overview(monkeypatch):
     from domoticz_mcp.server import get_overview
-    
+
+    private_endpoint_marker = "private-domoticz-endpoint-marker"
+    monkeypatch.setattr(
+        server_module,
+        "DOMOTICZ_BASE_URL",
+        private_endpoint_marker,
+    )
     respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getversion").mock(
         return_value=Response(200, json={"version": "2024.1", "build_time": "2024-01-01"})
     )
@@ -654,6 +660,9 @@ async def test_get_overview():
     assert data["result"]["system"]["version"] == "2024.1"
     assert data["result"]["counts"]["devices"] == 3
     assert data["result"]["counts"]["rooms_plans"] == 2
+    assert "domoticz_url" not in data["result"]["system"]
+    if private_endpoint_marker in response:
+        raise AssertionError("Configured Domoticz endpoint escaped through overview")
 
 @pytest.mark.asyncio
 @respx.mock
@@ -805,6 +814,7 @@ async def _prepare_oauth_tool_test(tmp_path, monkeypatch):
     monkeypatch.setattr(server_module, "_oauth_login_start_lock", asyncio.Lock())
     monkeypatch.setattr(server_module, "_token_refresh_lock", asyncio.Lock())
     monkeypatch.setattr(server_module, "OAUTH_CALLBACK_TIMEOUT_SECONDS", 2.0)
+    monkeypatch.setattr(server_module.webbrowser, "open", lambda _url: True)
     return token_file
 
 
@@ -857,8 +867,11 @@ async def test_oauth_tools_complete_login_without_exposing_credentials(
         assert "test-client-secret" not in serialized_start
         assert "preserved-test-refresh-token" not in serialized_start
         assert flow.code_verifier not in serialized_start
+        assert "authorization_url" not in serialized_start
+        if flow.authorization_url in serialized_start:
+            raise AssertionError("OAuth transaction URL escaped through MCP output")
         authorization_query = urllib.parse.parse_qs(
-            urllib.parse.urlparse(started.authorization_url).query
+            urllib.parse.urlparse(flow.authorization_url).query
         )
         expected_challenge = (
             base64.urlsafe_b64encode(
@@ -872,7 +885,7 @@ async def test_oauth_tools_complete_login_without_exposing_credentials(
         wrong_state_status = await asyncio.to_thread(
             _request_oauth_callback,
             _oauth_callback_url(
-                started.authorization_url,
+                flow.authorization_url,
                 code="ignored-test-code",
                 state="wrong-state",
             ),
@@ -885,7 +898,7 @@ async def test_oauth_tools_complete_login_without_exposing_credentials(
         accepted_status = await asyncio.to_thread(
             _request_oauth_callback,
             _oauth_callback_url(
-                started.authorization_url,
+                flow.authorization_url,
                 code="accepted-test-code",
             ),
         )
@@ -923,7 +936,8 @@ async def test_concurrent_oauth_tool_start_reuses_one_flow(tmp_path, monkeypatch
         )
 
         assert first.flow_id == second.flow_id
-        assert first.authorization_url == second.authorization_url
+        assert "authorization_url" not in first.model_dump()
+        assert "authorization_url" not in second.model_dump()
         assert len(respx.calls) == 0
         with server_module._oauth_login_flow_lock:
             flow = server_module._active_oauth_login_flow
@@ -947,7 +961,7 @@ async def test_oauth_tool_flow_expires_and_closes_listener(tmp_path, monkeypatch
             flow = server_module._active_oauth_login_flow
         assert flow is not None
         authorization_query = urllib.parse.parse_qs(
-            urllib.parse.urlparse(started.authorization_url).query
+            urllib.parse.urlparse(flow.authorization_url).query
         )
         redirect = urllib.parse.urlparse(authorization_query["redirect_uri"][0])
         partial_client = socket.create_connection(
@@ -984,7 +998,7 @@ async def test_oauth_tool_reports_provider_rejection_without_exchange(
         callback_status = await asyncio.to_thread(
             _request_oauth_callback,
             _oauth_callback_url(
-                started.authorization_url,
+                flow.authorization_url,
                 error="access_denied",
             ),
         )
@@ -1023,7 +1037,7 @@ async def test_oauth_tool_sanitizes_token_exchange_failure(tmp_path, monkeypatch
         callback_status = await asyncio.to_thread(
             _request_oauth_callback,
             _oauth_callback_url(
-                started.authorization_url,
+                flow.authorization_url,
                 code="rejected-test-code",
             ),
         )
@@ -1069,11 +1083,14 @@ async def test_oauth_tool_start_is_immediate_and_shutdown_cancels_discovery(
             timeout=0.2,
         )
         assert discovery_started.is_set() is False
+        with server_module._oauth_login_flow_lock:
+            flow = server_module._active_oauth_login_flow
+        assert flow is not None
 
         callback_status = await asyncio.to_thread(
             _request_oauth_callback,
             _oauth_callback_url(
-                started.authorization_url,
+                flow.authorization_url,
                 code="accepted-test-code",
             ),
         )
@@ -1101,6 +1118,56 @@ async def test_oauth_tool_requires_client_id_and_known_flow(tmp_path, monkeypatc
         await server_module.start_oauth_login()
     with pytest.raises(ToolError, match="not found"):
         await server_module.get_oauth_login_status("A" * 32)
+
+
+@pytest.mark.asyncio
+async def test_oauth_tool_fails_cleanly_when_local_browser_is_unavailable(
+    tmp_path,
+    monkeypatch,
+):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+    monkeypatch.setattr(server_module.webbrowser, "open", lambda _url: False)
+
+    with pytest.raises(ToolError, match="Could not open a local browser"):
+        await server_module.start_oauth_login()
+
+    with server_module._oauth_login_flow_lock:
+        assert server_module._active_oauth_login_flow is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_tool_bounds_a_stalled_local_browser_launcher(
+    tmp_path,
+    monkeypatch,
+):
+    await _prepare_oauth_tool_test(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        server_module,
+        "OAUTH_BROWSER_OPEN_TIMEOUT_SECONDS",
+        0.005,
+    )
+    monkeypatch.setattr(
+        server_module.webbrowser,
+        "open",
+        lambda _url: server_module.time.sleep(0.05) or True,
+    )
+
+    try:
+        started = await asyncio.wait_for(
+            server_module.start_oauth_login(),
+            timeout=0.2,
+        )
+
+        assert started.status == "pending"
+        assert "authorization_url" not in started.model_dump()
+        with server_module._oauth_login_flow_lock:
+            assert server_module._active_oauth_login_flow is not None
+        await asyncio.sleep(0.06)
+        assert (
+            await server_module.get_oauth_login_status(started.flow_id)
+        ).status == "pending"
+    finally:
+        await server_module._shutdown_oauth_login_flow()
 
 
 @pytest.mark.asyncio
@@ -1258,14 +1325,17 @@ async def test_interactive_oauth_callback_has_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_interactive_oauth_rejects_wrong_state_then_accepts_valid_callback(monkeypatch):
+async def test_interactive_oauth_rejects_wrong_state_then_accepts_valid_callback(
+    monkeypatch,
+    capsys,
+):
     authorization_urls = queue.Queue()
     monkeypatch.setattr(server_module, "DOMOTICZ_BASE_URL", "https://domoticz.example")
     monkeypatch.setattr(server_module, "DOMOTICZ_CLIENT_ID", "client-id")
     monkeypatch.setattr(
         server_module.webbrowser,
         "open",
-        lambda url: authorization_urls.put(url) or False,
+        lambda url: authorization_urls.put(url) or True,
     )
 
     flow_task = asyncio.create_task(
@@ -1300,6 +1370,9 @@ async def test_interactive_oauth_rejects_wrong_state_then_accepts_valid_callback
     assert code == "valid-code"
     assert code_verifier
     assert returned_redirect_uri == redirect_uri
+    stderr = capsys.readouterr().err
+    if authorization_url in stderr or redirect_uri in stderr:
+        raise AssertionError("OAuth transaction data was written to stderr")
 
 @pytest.mark.asyncio
 @respx.mock
@@ -1340,7 +1413,45 @@ async def test_do_request_translates_upstream_timeout():
                 "https://domoticz.example/json.htm",
             )
 
-    assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_http_errors_do_not_expose_request_endpoint_or_query_values():
+    marker = "private-query-marker"
+
+    async def error_handler(request):
+        return Response(500, request=request)
+
+    transport = httpx.MockTransport(error_handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ToolError) as exc_info:
+            await server_module._do_request(
+                client,
+                "GET",
+                f"https://private.example/json.htm?value={marker}",
+            )
+
+    message = str(exc_info.value)
+    assert message == "Domoticz request failed with HTTP 500."
+    assert exc_info.value.__cause__ is None
+    if marker in message or "private.example" in message:
+        raise AssertionError("HTTP error exposed its request target")
+
+
+def test_upstream_errors_do_not_echo_response_details():
+    marker = "private-upstream-error-marker"
+    response = Response(200, json={
+        "status": "ERR",
+        "message": f"password={marker}",
+    })
+
+    with pytest.raises(ToolError) as exc_info:
+        server_module._tool_result(response, "Testing action")
+
+    assert str(exc_info.value) == "Testing action failed."
+    if marker in str(exc_info.value):
+        raise AssertionError("Upstream error detail escaped through ToolError")
 
 
 @pytest.mark.asyncio
@@ -1470,6 +1581,222 @@ def test_format_response_helper():
     resp = _format_response(test_data)
     assert json.loads(resp) == test_data
 
+
+def test_public_data_sanitization_is_recursive_non_mutating_and_idempotent():
+    markers = [f"must-not-escape-{index}" for index in range(1, 10)]
+    jwt_marker = (
+        "aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc"
+    )
+    pem_marker = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "synthetic-private-material\n"
+        "-----END PRIVATE KEY-----"
+    )
+    original = {
+        "Password": markers[0],
+        "nested": [
+            {
+                "api-key": markers[1],
+                "oauthState": markers[2],
+                "callback_uri": "https://private.example/callback",
+            }
+        ],
+        "named_value": {
+            "Name": "mqtt_password",
+            "Value": markers[3],
+        },
+        "Extra": json.dumps({"client_secret": markers[4]}),
+        "message": (
+            f"Bearer {markers[5]} password={markers[6]} "
+            f"https://private.example/{markers[7]} 192.0.2.10"
+        ),
+        "jwt_text": f"received {jwt_marker}",
+        "pem_text": pem_marker,
+        "safe": {"Name": "Kitchen", "Value": markers[8]},
+    }
+
+    sanitized = server_module._sanitize_public_data(original)
+    serialized = json.dumps(sanitized)
+
+    for marker in markers[:8]:
+        if marker in serialized:
+            raise AssertionError("Sensitive synthetic marker escaped redaction")
+    if jwt_marker in serialized or pem_marker in serialized:
+        raise AssertionError("Unlabeled credential material escaped redaction")
+    assert markers[8] in serialized
+    assert original["Password"] == markers[0]
+    assert sanitized["Password"] == server_module.PUBLIC_REDACTION
+    assert sanitized["named_value"]["Value"] == server_module.PUBLIC_REDACTION
+    assert sanitized["safe"]["Value"] == markers[8]
+    assert server_module._sanitize_public_data(sanitized) == sanitized
+
+
+def test_sensitive_field_detection_normalizes_common_variants():
+    sensitive_fields = (
+        "Password",
+        "mqtt_username",
+        "MQTTPassword",
+        "MQTTUsername",
+        "MQTTBroker",
+        "mqttpass",
+        "mqttuser",
+        "mqttbroker",
+        "mqttserver",
+        "mqttport",
+        "mqttaddress",
+        "mqtturl",
+        "brokerhost",
+        "proxyurl",
+        "callbackurl",
+        "redirecturi",
+        "authorizationurl",
+        "secretkey",
+        "consumersecret",
+        "password1",
+        "accesstoken1",
+        "HTTPPassword",
+        "IPAddress",
+        "RemoteIPAddress",
+        "somepassword",
+        "api-key",
+        "clientSecret",
+        "access.token",
+        "refresh token",
+        "PairingKey",
+        "link-id",
+        "OAuthState",
+        "code_verifier",
+        "state",
+        "code",
+        "privateEndpoint",
+        "WebLocalNetworks",
+        "Mode1",
+        "StrParam6",
+        "Extra",
+    )
+
+    assert all(
+        server_module._is_sensitive_public_field(field_name)
+        for field_name in sensitive_fields
+    )
+    assert server_module._is_sensitive_public_field("Name") is False
+    assert server_module._is_sensitive_public_field("Enabled") is False
+    assert server_module._is_sensitive_public_field("BatteryLevel") is False
+
+
+def test_public_text_sanitization_covers_network_and_assignment_variants():
+    marker = "synthetic-redaction-marker"
+    sensitive_text = (
+        f"api key={marker}; pairing key='{marker}'; "
+        f"code.verifier={marker}; MQTTPassword={marker}; "
+        "addresses 2001:db8::1234 and [fe80::1%eth0]:8123; "
+        "mapped ::ffff:192.0.2.45 and [::ffff:192.0.2.46]; "
+        "domoticz:8080/json; broker.local/topic; "
+        "custom+transport://internal-host/private; "
+        "private.privatezone; connected to home-hub; "
+        "AA:BB:CC:DD:EE:FF"
+    )
+
+    sanitized = server_module._sanitize_public_text(sensitive_text)
+
+    if marker in sanitized:
+        raise AssertionError("Credential assignment variant escaped redaction")
+    for network_value in (
+        "2001:db8::1234",
+        "fe80::1%eth0",
+        "::ffff:192.0.2.45",
+        "::ffff:192.0.2.46",
+        "domoticz:8080",
+        "broker.local",
+        "internal-host",
+        "private.privatezone",
+        "home-hub",
+        "AA:BB:CC:DD:EE:FF",
+    ):
+        if network_value in sanitized:
+            raise AssertionError("Network endpoint variant escaped redaction")
+
+    safe_text = (
+        "transport=sse compass=north spin=fast enduser=guest "
+        "scripts/lights.lua room/device ratio a/b device:123"
+    )
+    assert server_module._sanitize_public_text(safe_text) == safe_text
+
+
+def test_public_data_sanitization_covers_oauth_objects_and_mapping_keys():
+    marker = "synthetic-oauth-marker"
+    original = {
+        "transaction": {
+            "state": marker,
+            "code": marker,
+        },
+        "loginflow": json.dumps({"state": marker}),
+        "flat": {
+            "state": marker,
+            "code": marker,
+        },
+        "lone_state": {"state": marker},
+        "lone_code": {"code": marker},
+        "context_by_value": {"type": "oauth", "state": marker},
+        "Canary": marker,
+        "flow_id": marker,
+        f"https://internal.example/{marker}": {"safe": marker},
+        f"custom+sync://second-internal/{marker}": marker,
+        "nested": {
+            f"192.0.2.25:8080/{marker}": marker,
+        },
+    }
+
+    sanitized = server_module._sanitize_public_data(original)
+    serialized = json.dumps(sanitized)
+
+    if marker in serialized:
+        raise AssertionError("OAuth or mapping-key data escaped redaction")
+    assert server_module.PUBLIC_REDACTION in sanitized
+    assert any(
+        str(key).startswith(f"{server_module.PUBLIC_REDACTION} ")
+        for key in sanitized
+    )
+    assert sanitized["transaction"]["state"] == server_module.PUBLIC_REDACTION
+    assert marker not in sanitized["loginflow"]
+    assert sanitized["flat"]["code"] == server_module.PUBLIC_REDACTION
+    assert sanitized["lone_state"]["state"] == server_module.PUBLIC_REDACTION
+    assert sanitized["lone_code"]["code"] == server_module.PUBLIC_REDACTION
+    assert (
+        sanitized["context_by_value"]["state"]
+        == server_module.PUBLIC_REDACTION
+    )
+
+
+def test_public_data_sanitization_bounds_nested_json_strings():
+    marker = "synthetic-depth-marker"
+    nested = json.dumps({"Password": marker})
+    for _ in range(server_module.MAX_PUBLIC_SANITIZE_DEPTH + 5):
+        nested = json.dumps({"wrapped": nested})
+
+    sanitized = server_module._sanitize_public_data(nested)
+
+    if marker in json.dumps(sanitized):
+        raise AssertionError("Nested JSON bypassed the sanitization depth bound")
+
+
+def test_token_file_load_errors_do_not_expose_exception_details(monkeypatch):
+    marker = "synthetic-private-token-path"
+
+    def fail_lstat(_path):
+        raise OSError(f"cannot access {marker}")
+
+    monkeypatch.setattr(server_module.os.path, "exists", lambda _path: True)
+    monkeypatch.setattr(server_module.os, "lstat", fail_lstat)
+
+    with pytest.raises(ToolError) as exc_info:
+        server_module._load_token_data()
+
+    assert str(exc_info.value) == "Failed to load the Domoticz OAuth token file."
+    if marker in str(exc_info.value):
+        raise AssertionError("Token-file exception details escaped")
+
+
 def test_command_url_helper_encodes_query_params():
     from domoticz_mcp.server import _command_url
 
@@ -1562,3 +1889,102 @@ async def test_new_resources():
     )
     response = await get_hardware_resource()
     assert "MyHardware" in json.loads(response)["result"][0]["Name"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_hardware_resource_exposes_only_reviewed_metadata():
+    markers = [f"hardware-private-{index}" for index in range(10)]
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=gethardware").mock(
+        return_value=Response(200, json={
+            "status": "OK",
+            "title": "Hardware",
+            "result": [{
+                "idx": "7",
+                "Name": "MQTT gateway",
+                "Type": "MQTT",
+                "Enabled": "true",
+                "Password": markers[0],
+                "Username": markers[1],
+                "Address": markers[2],
+                "Port": 1883,
+                "PairingKey": markers[3],
+                "LinkId": markers[4],
+                "OAuthState": markers[5],
+                "Extra": json.dumps({"client_secret": markers[6]}),
+                "Mode1": markers[7],
+                "NestedConfig": {"refresh_token": markers[8]},
+                "ArbitraryPluginField": markers[9],
+            }],
+        })
+    )
+
+    response = json.loads(await server_module.get_hardware_resource())
+    item = response["result"][0]
+
+    assert response["status"] == "OK"
+    assert response["title"] == "Hardware"
+    assert item == {
+        "idx": "7",
+        "Name": "MQTT gateway",
+        "Type": "MQTT",
+        "Enabled": "true",
+    }
+    serialized = json.dumps(response)
+    if any(marker in serialized for marker in markers):
+        raise AssertionError("Hardware configuration escaped its public allowlist")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_settings_resource_exposes_only_reviewed_non_sensitive_fields():
+    markers = [f"settings-private-{index}" for index in range(5)]
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getsettings").mock(
+        return_value=Response(200, json={
+            "status": "OK",
+            "title": "settings",
+            "Language": "en",
+            "TempUnit": 1,
+            "SecPassword": markers[0],
+            "WebLocalNetworks": markers[1],
+            "ClientSecret": markers[2],
+            "Nested": {"api_key": markers[3]},
+            "UnknownSetting": markers[4],
+        })
+    )
+
+    response = json.loads(await server_module.get_settings_resource())
+
+    assert response == {
+        "status": "OK",
+        "title": "settings",
+        "Language": "en",
+        "TempUnit": 1,
+    }
+    serialized = json.dumps(response)
+    if any(marker in serialized for marker in markers):
+        raise AssertionError("Private setting escaped its public allowlist")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_generic_api_result_cannot_return_unexpected_upstream_fields():
+    marker = "generic-api-private-marker"
+    respx.get(
+        f"{DOMOTICZ_API_URL}?type=command&param=custom"
+    ).mock(return_value=Response(200, json={
+        "status": "OK",
+        "title": "Custom",
+        "Password": marker,
+        "result": [{"access_token": marker}],
+    }))
+
+    result = await server_module.call_domoticz_api(
+        "custom",
+        {},
+        confirm=True,
+    )
+
+    assert result.model_dump() == {"status": "OK", "title": "Custom"}
+    if marker in result.model_dump_json():
+        raise AssertionError("Generic API response exposed an unexpected field")

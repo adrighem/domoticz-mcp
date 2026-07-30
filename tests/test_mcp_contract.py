@@ -46,6 +46,7 @@ async def test_mcp_tools_expose_complete_contract_metadata():
         assert tool.title
         assert tool.outputSchema
         assert tool.outputSchema["type"] == "object"
+        assert tool.outputSchema["additionalProperties"] is False
         assert tool.annotations is not None
         assert tool.annotations.readOnlyHint is not None
         assert tool.annotations.destructiveHint is not None
@@ -91,13 +92,17 @@ async def test_mcp_tools_expose_complete_contract_metadata():
     assert "pattern" in tools["control_blinds"].inputSchema["properties"]["command"]
     assert "pattern" in tools["switch_scene"].inputSchema["properties"]["command"]
     device_schema = tools["search_devices_tool"].outputSchema["$defs"]["DomoticzItem"]
+    assert device_schema["additionalProperties"] is False
     assert {"idx", "Name", "Data", "Status", "Type", "SubType"} <= set(
         device_schema["properties"]
     )
     energy_schema = tools["get_daily_energy_history"].outputSchema
     assert "EnergyHistorySummary" in energy_schema["$defs"]
     assert "EnergyHistorySample" in energy_schema["$defs"]
+    assert energy_schema["$defs"]["EnergyHistorySummary"]["additionalProperties"] is False
+    assert energy_schema["$defs"]["EnergyHistorySample"]["additionalProperties"] is False
     assert tools["start_oauth_login"].outputSchema["properties"]["status"]["const"] == "pending"
+    assert "authorization_url" not in tools["start_oauth_login"].outputSchema["properties"]
     assert set(
         tools["get_oauth_login_status"].outputSchema["properties"]["status"]["enum"]
     ) == {"pending", "complete", "expired", "error"}
@@ -179,10 +184,64 @@ async def test_protocol_returns_structured_output_and_real_tool_errors():
     assert confirmation_error.isError is True
     assert "Confirmation required" in confirmation_error.content[0].text
     assert upstream_error.isError is True
-    assert "Switch command was rejected" in upstream_error.content[0].text
+    assert "Toggling switch failed" in upstream_error.content[0].text
     assert mixed_case_state.isError is False
     assert mixed_case_blinds.isError is False
     assert mixed_case_scene.isError is False
+
+
+@pytest.mark.asyncio
+async def test_protocol_validation_errors_hide_sensitive_inputs():
+    private_input = "synthetic-private-input-" * 8
+
+    async with create_connected_server_and_client_session(server.mcp) as session:
+        result = await session.call_tool(
+            "set_security_status",
+            {
+                "secstatus": 1,
+                "seccode": private_input,
+                "confirm": True,
+            },
+        )
+
+    assert result.isError is True
+    rendered = "".join(
+        block.text
+        for block in result.content
+        if block.type == "text"
+    )
+    if private_input in rendered:
+        raise AssertionError("Tool validation error exposed its input value")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_protocol_generic_api_output_drops_unexpected_fields():
+    marker = "protocol-private-output-marker"
+    respx.get(
+        f"{server.DOMOTICZ_API_URL}?type=command&param=custom"
+    ).mock(return_value=httpx.Response(200, json={
+        "status": "OK",
+        "title": "Custom",
+        "Password": marker,
+        "result": [{"refresh_token": marker}],
+    }))
+
+    async with create_connected_server_and_client_session(server.mcp) as session:
+        result = await session.call_tool(
+            "call_domoticz_api",
+            {"param": "custom", "kwargs": {}, "confirm": True},
+        )
+
+    assert result.isError is False
+    assert result.structuredContent == {"status": "OK", "title": "Custom"}
+    rendered = "".join(
+        block.text
+        for block in result.content
+        if block.type == "text"
+    )
+    if marker in rendered or marker in json.dumps(result.structuredContent):
+        raise AssertionError("Protocol output exposed an unexpected upstream field")
 
 
 @pytest.mark.asyncio
@@ -308,7 +367,7 @@ async def test_rejected_mutation_still_invalidates_affected_caches(monkeypatch):
         cache["timestamp"] = 123
         cache["generation"] = 7
 
-    with pytest.raises(ToolError, match="Rejected"):
+    with pytest.raises(ToolError, match="Toggling switch failed"):
         await server.toggle_switch(idx=1)
 
     for name, cache in CACHES.items():
