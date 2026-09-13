@@ -41,7 +41,7 @@ async def test_mcp_tools_expose_complete_contract_metadata():
     async with create_connected_server_and_client_session(server.mcp) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
 
-    assert len(tools) == 29
+    assert len(tools) == 31
     for tool in tools.values():
         assert tool.title
         assert tool.outputSchema
@@ -62,13 +62,16 @@ async def test_mcp_tools_expose_complete_contract_metadata():
         "get_weekly_energy_history",
         "get_monthly_energy_history",
         "get_oauth_login_status",
+        "get_switch_actions",
     }
     assert {name for name, tool in tools.items() if tool.annotations.readOnlyHint} == read_only
     assert tools["restart_system"].annotations.destructiveHint is True
     assert tools["call_domoticz_api"].annotations.destructiveHint is True
     assert tools["delete_device"].annotations.destructiveHint is True
+    assert tools["set_switch_actions"].annotations.destructiveHint is True
     assert tools["toggle_switch"].annotations.idempotentHint is False
     assert tools["set_switch_state"].annotations.idempotentHint is True
+    assert tools["set_switch_actions"].annotations.idempotentHint is True
     additive = {
         "add_user_variable",
         "create_event",
@@ -322,6 +325,7 @@ MUTATION_CASES = [
     (server.set_security_status, {"secstatus": 1, "seccode": "1234", "confirm": True}, {"device", "scene", "user_variable"}),
     (server.set_color_brightness, {"hue": 120, "brightness": 50, "idx": 1}, {"device", "scene", "user_variable"}),
     (server.set_color_temperature, {"kelvin": 50, "idx": 1}, {"device", "scene", "user_variable"}),
+    (server.set_switch_actions, {"idx": 1, "on_action": "http://192.168.1.50/on", "confirm": True}, {"device"}),
 ]
 
 

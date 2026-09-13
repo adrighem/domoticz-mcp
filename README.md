@@ -18,7 +18,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **Search:** `search_devices_tool` searches devices by name or current data/status text. `search_scripts_tool` searches inside Domoticz event scripts.
 - **Authentication:** `start_oauth_login` starts a short-lived login and opens the authorization page locally without returning transaction data. `get_oauth_login_status` reports when the login is complete.
 - **Energy History:** `get_daily_energy_history`, `get_weekly_energy_history`, and `get_monthly_energy_history` read counter graph history for energy, gas, and water meters by `idx` or `name`.
-- **Device Control:** `toggle_switch`, `set_switch_state`, `set_dimmer_level`, `set_temperature_setpoint`, `control_blinds`, `set_color_brightness`, and `set_color_temperature` control supported devices by `idx` or `name`.
+- **Device Control:** `toggle_switch`, `set_switch_state`, `get_switch_actions`, `set_switch_actions`, `set_dimmer_level`, `set_temperature_setpoint`, `control_blinds`, `set_color_brightness`, and `set_color_temperature` control supported devices and configure switch action URLs/scripts by `idx` or `name`.
 - **Device Management:** `rename_device`, `delete_device`, `create_virtual_sensor`, and `update_device_value` manage devices and virtual sensors.
 - **Scenes and Groups:** `switch_scene` activates configured scenes/groups by `idx` or `name`.
 - **User Variables:** `add_user_variable`, `update_user_variable`, and `delete_user_variable` manage Domoticz user variables.
@@ -26,7 +26,7 @@ The server exposes **Tools** (for active control and modifications), **Resources
 - **System Actions:** `restart_system`, `add_log_message`, `send_notification`, and `set_security_status` call Domoticz system, log, notification, and security APIs.
 - **Advanced:** `call_domoticz_api` executes a generic Domoticz command API call and returns only its sanitized status/title.
 
-High-impact tools require `confirm=True`: `call_domoticz_api`, `delete_device`, `delete_user_variable`, `update_event`, `restart_system`, and `set_security_status`.
+High-impact tools require `confirm=True`: `call_domoticz_api`, `delete_device`, `delete_user_variable`, `set_switch_actions`, `update_event`, `restart_system`, and `set_security_status`.
 
 ### Resources (Context)
 - **`domoticz://dashboard`**: Read a curated view of favorite and currently active devices (lights on, sensors active).

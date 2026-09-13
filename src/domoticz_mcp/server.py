@@ -486,6 +486,25 @@ class DomoticzToolResult(BaseModel):
     title: str | None = Field(default=None, description="Optional Domoticz response title")
 
 
+class SwitchActions(BaseModel):
+    """Switch on and off action URLs or scripts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    idx: int | str = Field(description="Numeric Domoticz device idx")
+    name: str = Field(description="Configured switch device name")
+    on_action: str | None = Field(default=None, description="Action URL or script executed on switch On")
+    off_action: str | None = Field(default=None, description="Action URL or script executed on switch Off")
+
+
+class SwitchActionsResult(DomoticzToolResult):
+    """Result of querying or updating switch actions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: SwitchActions = Field(description="Configured switch actions")
+
+
 class OAuthLoginStartResult(BaseModel):
     """Credential-free details for a locally opened browser login."""
 
@@ -2036,6 +2055,79 @@ async def _resolve_idx(
     return None
 
 
+_ALLOWED_ACTION_SCHEMES = ("http://", "https://", "script://")
+
+
+def _sanitize_action_value(action: Any) -> str | None:
+    """Sanitize switch action URL or script path while removing embedded credentials."""
+    if action is None or not isinstance(action, str):
+        return None
+    action_str = action.strip()
+    if not action_str:
+        return None
+
+    # Domoticz stores and returns StrParam1/StrParam2 base64 encoded
+    if "://" not in action_str:
+        try:
+            decoded_bytes = base64.b64decode(action_str, validate=True)
+            decoded_text = decoded_bytes.decode("utf-8")
+            if any(decoded_text.lower().startswith(scheme) for scheme in _ALLOWED_ACTION_SCHEMES):
+                action_str = decoded_text
+        except Exception:
+            pass
+
+    if "://" in action_str:
+        try:
+            parsed = urllib.parse.urlsplit(action_str)
+            if parsed.username or parsed.password:
+                userinfo, at, hostport = parsed.netloc.rpartition("@")
+                if at:
+                    if ":" in userinfo:
+                        user, _, _ = userinfo.partition(":")
+                        safe_userinfo = f"{user}:{PUBLIC_REDACTION}"
+                    else:
+                        safe_userinfo = PUBLIC_REDACTION
+                    sanitized_netloc = f"{safe_userinfo}@{hostport}"
+                    parsed = parsed._replace(netloc=sanitized_netloc)
+                    action_str = urllib.parse.urlunsplit(parsed)
+        except Exception:
+            pass
+
+    sanitized = _CREDENTIAL_ASSIGNMENT_RE.sub(_redact_assignment, action_str)
+    sanitized = _AUTHORIZATION_VALUE_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _JWT_RE.sub(PUBLIC_REDACTION, sanitized)
+    sanitized = _PEM_PRIVATE_KEY_RE.sub(PUBLIC_REDACTION, sanitized)
+    return sanitized
+
+
+def _validate_action_string(action: str | None, param_name: str) -> None:
+    """Validate a user-supplied switch action URL or script."""
+    if action is None or action == "":
+        return
+    if any(c in action for c in ("\r", "\n", "\0")):
+        _error_response(f"Invalid {param_name}: control characters are not allowed.")
+    action_lower = action.lower()
+    if not any(action_lower.startswith(scheme) for scheme in _ALLOWED_ACTION_SCHEMES):
+        _error_response(f"Invalid {param_name}: scheme must be http, https, or script (or empty to clear).")
+
+
+async def _get_device_raw(client: httpx.AsyncClient, idx: int | str) -> dict[str, Any]:
+    """Fetch raw device dictionary for idx directly from Domoticz."""
+    response = await _do_request(client, "GET", f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid={idx}")
+    try:
+        payload = response.json()
+    except ValueError:
+        raise ToolError("Reading device failed: Domoticz returned invalid JSON.") from None
+    if not isinstance(payload, dict):
+        raise ToolError("Reading device failed: Domoticz returned an unexpected response.")
+    result = payload.get("result")
+    if result is None:
+        return {}
+    if not isinstance(result, list) or not result or not isinstance(result[0], dict):
+        _error_response("Device not found")
+    return result[0]
+
+
 async def _resolve_device_idx(client: "httpx.AsyncClient", idx: Optional[int] = None, name: Optional[str] = None) -> Optional[int]:
     """Resolve a device to its idx."""
     return await _resolve_idx(client, idx, name, _device_cache, f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true")
@@ -3108,6 +3200,105 @@ async def set_switch_state(
             f"{DOMOTICZ_API_URL}?type=command&param=switchlight&idx={resolved_idx}&switchcmd={state.capitalize()}",
             "Setting switch state",
             (_device_cache, _scene_cache, _user_variable_cache),
+        )
+
+
+@mcp.tool(
+    title="Get switch actions",
+    annotations=_tool_annotations(read_only=True),
+)
+async def get_switch_actions(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+) -> SwitchActionsResult:
+    """Get On Action and Off Action URLs or scripts for a switch. Preferred: `idx`. Cross-ref: `set_switch_actions`."""
+    async with create_client() as client:
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if not resolved_idx:
+            _error_response("Device not found")
+        device = await _get_device_raw(client, resolved_idx)
+        device_name = str(device.get("Name", name or str(resolved_idx)))
+        on_action = _sanitize_action_value(device.get("StrParam1"))
+        off_action = _sanitize_action_value(device.get("StrParam2"))
+        return SwitchActionsResult(
+            status="OK",
+            result=SwitchActions(
+                idx=resolved_idx,
+                name=device_name,
+                on_action=on_action,
+                off_action=off_action,
+            ),
+        )
+
+
+@mcp.tool(
+    title="Set switch actions",
+    annotations=_tool_annotations(read_only=False, destructive=True, idempotent=True),
+)
+async def set_switch_actions(
+    idx: EntityIdxArg = None,
+    name: EntityNameArg = None,
+    on_action: Annotated[
+        str | None,
+        Field(
+            max_length=500,
+            description="On action URL or script:// path, or empty string to clear (omit or pass null to leave unchanged)",
+        ),
+    ] = None,
+    off_action: Annotated[
+        str | None,
+        Field(
+            max_length=500,
+            description="Off action URL or script:// path, or empty string to clear (omit or pass null to leave unchanged)",
+        ),
+    ] = None,
+    confirm: ConfirmArg = False,
+) -> SwitchActionsResult:
+    """Configure switch On Action and Off Action URLs or scripts. Preferred: `idx`. Requires `confirm=True`."""
+    if not confirm:
+        _confirmation_required("configuring switch actions")
+    if on_action is None and off_action is None:
+        _error_response("At least one of on_action or off_action must be specified.")
+
+    _validate_action_string(on_action, "on_action")
+    _validate_action_string(off_action, "off_action")
+
+    async with create_client() as client:
+        resolved_idx = await _resolve_device_idx(client, idx, name)
+        if not resolved_idx:
+            _error_response("Device not found")
+        device = await _get_device_raw(client, resolved_idx)
+        device_name = str(device.get("Name", name or str(resolved_idx)))
+        switchtype = device.get("SwitchTypeVal", device.get("SwitchType", 0))
+
+        current_on = str(device.get("StrParam1", "") or "")
+        current_off = str(device.get("StrParam2", "") or "")
+
+        new_on = on_action if on_action is not None else current_on
+        new_off = off_action if off_action is not None else current_off
+
+        params: dict[str, Any] = {
+            "idx": resolved_idx,
+            "name": device_name,
+            "switchtype": switchtype,
+            "onaction": new_on,
+            "offaction": new_off,
+        }
+        url = _command_url("setswitchsettings", params)
+        try:
+            response = await _do_request(client, "GET", url)
+            _domoticz_payload(response, "Configuring switch actions")
+        finally:
+            _invalidate_caches(_device_cache)
+
+        return SwitchActionsResult(
+            status="OK",
+            result=SwitchActions(
+                idx=resolved_idx,
+                name=device_name,
+                on_action=_sanitize_action_value(new_on),
+                off_action=_sanitize_action_value(new_off),
+            ),
         )
 
 

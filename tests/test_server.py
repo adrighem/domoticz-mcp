@@ -18,6 +18,7 @@ import domoticz_mcp.server as server_module
 import domoticz_mcp.server as server
 from domoticz_mcp.server import (
     get_device, toggle_switch, get_room_devices, get_all_devices,
+    get_switch_actions, set_switch_actions,
     _resolve_device_idx, _resolve_scene_idx, _resolve_user_variable_idx,
     create_client, DOMOTICZ_API_URL,
     _device_cache, _scene_cache, _user_variable_cache, _plans_cache,
@@ -1988,3 +1989,130 @@ async def test_generic_api_result_cannot_return_unexpected_upstream_fields():
     assert result.model_dump() == {"status": "OK", "title": "Custom"}
     if marker in result.model_dump_json():
         raise AssertionError("Generic API response exposed an unexpected field")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_switch_actions_by_idx():
+    device_data = {
+        "status": "OK",
+        "result": [
+            {
+                "idx": "10",
+                "Name": "Hallway Light",
+                "StrParam1": "c2NyaXB0Oi8vL3Vzci9sb2NhbC9iaW4vd2FrZS5zaA==",
+                "StrParam2": "script:///home/pi/scripts/off.sh",
+                "SwitchTypeVal": 0,
+            }
+        ],
+    }
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid=10").mock(
+        return_value=Response(200, json=device_data)
+    )
+
+    result = await get_switch_actions(idx=10)
+    assert result.status == "OK"
+    assert result.result.idx == 10
+    assert result.result.name == "Hallway Light"
+    assert result.result.on_action == "script:///usr/local/bin/wake.sh"
+    assert result.result.off_action == "script:///home/pi/scripts/off.sh"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_switch_actions_by_name_and_redaction():
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json=DEVICES_MOCK_RESPONSE)
+    )
+    device_data = {
+        "status": "OK",
+        "result": [
+            {
+                "idx": "1",
+                "Name": "Living Room Light",
+                "StrParam1": "http://admin:secretpass@192.168.1.50/on?token=mytoken",
+                "StrParam2": "",
+                "SwitchTypeVal": 0,
+            }
+        ],
+    }
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid=1").mock(
+        return_value=Response(200, json=device_data)
+    )
+
+    result = await get_switch_actions(name="Living Room Light")
+    assert result.status == "OK"
+    assert result.result.idx == 1
+    assert "secretpass" not in result.result.on_action
+    assert "[REDACTED]" in result.result.on_action
+    assert result.result.off_action is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_switch_actions_device_not_found():
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&filter=all&used=true").mock(
+        return_value=Response(200, json={"result": []})
+    )
+    with pytest.raises(ToolError, match="Device not found"):
+        await get_switch_actions(name="Missing Switch")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_switch_actions_requires_confirm():
+    with pytest.raises(ToolError, match="Confirmation required"):
+        await set_switch_actions(idx=1, on_action="http://192.168.1.50/on", confirm=False)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_switch_actions_requires_at_least_one_action():
+    with pytest.raises(ToolError, match="At least one of on_action or off_action must be specified"):
+        await set_switch_actions(idx=1, confirm=True)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_switch_actions_validates_scheme_and_control_chars():
+    with pytest.raises(ToolError, match="control characters"):
+        await set_switch_actions(idx=1, on_action="http://example.com/\nmalicious", confirm=True)
+
+    with pytest.raises(ToolError, match="scheme must be http, https, or script"):
+        await set_switch_actions(idx=1, on_action="ftp://example.com/file", confirm=True)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_switch_actions_success_and_cache_invalidation():
+    device_data = {
+        "status": "OK",
+        "result": [
+            {
+                "idx": "1",
+                "Name": "Living Room Light",
+                "StrParam1": "http://192.168.1.50/old_on",
+                "StrParam2": "http://192.168.1.50/old_off",
+                "SwitchTypeVal": 0,
+            }
+        ],
+    }
+    respx.get(f"{DOMOTICZ_API_URL}?type=command&param=getdevices&rid=1").mock(
+        return_value=Response(200, json=device_data)
+    )
+    respx.get(
+        f"{DOMOTICZ_API_URL}?type=command&param=setswitchsettings&idx=1&name=Living+Room+Light&switchtype=0&onaction=http%3A%2F%2F192.168.1.50%2Fnew_on&offaction=http%3A%2F%2F192.168.1.50%2Fold_off"
+    ).mock(return_value=Response(200, json={"status": "OK"}))
+
+    _device_cache["data"] = ["cached_device"]
+    _device_cache["timestamp"] = 12345
+
+    result = await set_switch_actions(
+        idx=1,
+        on_action="http://192.168.1.50/new_on",
+        confirm=True,
+    )
+    assert result.status == "OK"
+    assert result.result.on_action == "http://192.168.1.50/new_on"
+    assert result.result.off_action == "http://192.168.1.50/old_off"
+    assert _device_cache["data"] is None
